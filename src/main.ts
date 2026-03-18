@@ -1,109 +1,74 @@
 import {
-  BigNumber,
-  Seconds,
-  Minutes,
-  TimeSpan,
-  Milliseconds,
-  assertModuleCompatibility,
-} from "lace-sdk";
-
-// Value objects
-const amount = BigNumber(42n);
-console.log("BigNumber:", amount, "→ bigint:", BigNumber.valueOf(amount));
-
-// Time conversions
-const secs = Seconds(90);
-const mins = Seconds.toMinutes(secs);
-console.log(`${secs} seconds = ${mins} minutes`);
-
-// TimeSpan
-const span = TimeSpan.fromMinutes(Minutes(125));
-console.log(
-  `125 min = ${span.getHours()}h ${span.getMinutes()}m → ISO: ${span.toString()}`
-);
-
-// assertModuleCompatibility (empty modules = no-op, verifies it's callable)
-assertModuleCompatibility([]);
-console.log("assertModuleCompatibility([]) OK");
-
-// Render to page
-const out = document.getElementById("out")!;
-out.textContent = [
-  `BigNumber(42n) = "${amount}"`,
-  `BigNumber.valueOf("${amount}") = ${BigNumber.valueOf(amount)}`,
-  `Seconds(90) → Minutes = ${mins}`,
-  `TimeSpan 125min → ${span.toString()}`,
-  `Milliseconds(1500) → Seconds = ${Milliseconds.toSeconds(
-    Milliseconds(1500)
-  )}`,
-  "assertModuleCompatibility OK",
-].join("\n");
-
-// --- Web3Auth ---
-import {
+  createLaceWallet,
+  createInMemoryWalletEntity,
   deriveMnemonicFromKeyMaterial,
-  createWebWeb3AuthProvider,
-  HexBytes,
-  type Web3AuthKeyMaterial,
-} from "lace-sdk";
-import { Web3Auth } from "@web3auth/modal";
-import { CHAIN_NAMESPACES, CustomChainConfig } from "@web3auth/base";
-import { CommonPrivateKeyProvider } from "@web3auth/base-provider";
+} from "@input-output-hk/lace-sdk";
+import {
+  blockchainCardano,
+  cardanoProviderBlockfrost,
+  featureDev,
+  storageInMemory,
+  cryptoCardanoSdk,
+} from "@input-output-hk/lace-sdk/modules";
+import { config, featureFlags } from "./config";
+import { ui } from "./ui";
+import { getKeyMaterial } from "./web3auth";
 
-// 1. Test deriveMnemonicFromKeyMaterial (no user interaction needed)
-const testKeyMaterial: Web3AuthKeyMaterial = {
-  userId: "test-user",
-  privateKeyHex: HexBytes("a".repeat(64)),
-};
-const result = deriveMnemonicFromKeyMaterial(testKeyMaterial);
-out.textContent += `\n\n--- Web3Auth ---\nderiveMnemonicFromKeyMaterial: ${result.mnemonicWords.length} words, userId="${result.userId}"`;
-console.log("Mnemonic words:", result.mnemonicWords);
+// --- Create headless wallet ---
+ui.setStatus("Creating wallet...");
 
-const chainConfig: CustomChainConfig = {
-  chainNamespace: CHAIN_NAMESPACES.OTHER,
-  chainId: "0x0",
-  // not used
-  rpcTarget: "https://rpc.lace.io",
-};
-// 2. Set up web provider with Google login button
-// Consumer constructs and configures the Web3Auth instance directly
-const privateKeyProvider = new CommonPrivateKeyProvider({
-  config: { chainConfig },
+const wallet = await createLaceWallet({
+  modules: [
+    featureDev,
+    storageInMemory,
+    blockchainCardano,
+    cardanoProviderBlockfrost,
+    cryptoCardanoSdk,
+  ] as const,
+  environment: "development",
+  featureFlags,
+  config,
 });
 
-const web3auth = new Web3Auth({
-  clientId:
-    "BJYsKVCte9LKSWInWtBu99b03R3GYhNCax6MO6bAlZ8IA8GNIZDmBjtMB3qTHQDm-G5qH_vjTOb05HOvlXDJXss",
-  web3AuthNetwork: "sapphire_devnet",
-  chainConfig,
-  privateKeyProvider,
+ui.setStatus("Lace initialized");
+ui.showStateOutput();
+setInterval(() => {
+  ui.updateState(wallet.getState());
+}, 200);
+
+// --- Subscribe to addresses ---
+wallet.stateObservables.addresses.selectAllAddresses$.subscribe((addresses) => {
+  const first = addresses[0];
+  ui.updateAddress(first ? first.address : null);
 });
 
-// const { dispatch, stateObservables } = runLace({
-//   config: { blockfrostKey, cardanoChainId },
-//   modules: [module1, module2, cardanoProviderBLockfrost] as const,
-// });
+// --- Subscribe to tokens ---
+wallet.stateObservables.tokens.selectAllTokens$.subscribe((tokens) => {
+  ui.updateTokens(
+    tokens.length > 0
+      ? { count: tokens.length, json: JSON.stringify(tokens, null, 2) }
+      : null
+  );
+});
 
-// dispatch("action.something", { dawda });
-// stateObservables.typeSafeState.observable$;
+// --- Web3Auth login ---
+ui.onLoginClick(async () => {
+  const keyMaterial = await getKeyMaterial();
+  const { mnemonicWords, userId } = deriveMnemonicFromKeyMaterial(keyMaterial);
+  ui.appendStatus(
+    `\n\nLogin OK: userId="${userId}", ${mnemonicWords.length} words`
+  );
 
-const provider = createWebWeb3AuthProvider(web3auth);
+  // Create an in-memory wallet entity from the mnemonic
+  ui.appendStatus("\n\nCreating wallet entity...");
+  const password = new Uint8Array(Buffer.from("password"));
+  const walletEntity = await createInMemoryWalletEntity(wallet, {
+    mnemonicWords,
+    password,
+    walletName: `Web3Auth ${userId}`,
+  });
 
-const loginBtn = document.getElementById("web3auth-login") as HTMLButtonElement;
-loginBtn.addEventListener("click", async () => {
-  loginBtn.disabled = true;
-  loginBtn.textContent = "Logging in...";
-  try {
-    const keyMaterial = await provider.login();
-    const derived = deriveMnemonicFromKeyMaterial(keyMaterial);
-    out.textContent += `\n\nLogin OK: userId="${derived.userId}", ${
-      derived.mnemonicWords.length
-    } words\nMnemonic: ${derived.mnemonicWords.join(" ")}`;
-    console.log("Derived mnemonic words:", derived.mnemonicWords);
-  } catch (err) {
-    out.textContent += `\n\nLogin error: ${err}`;
-  } finally {
-    loginBtn.disabled = false;
-    loginBtn.textContent = "Login";
-  }
+  // Dispatch it into the store
+  wallet.dispatch("wallets.addWallet", walletEntity);
+  ui.appendStatus(`\nWallet added! walletId=${walletEntity.walletId}`);
 });

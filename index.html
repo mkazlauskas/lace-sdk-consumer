@@ -5,8 +5,13 @@
     <title>lace-sdk consumer</title>
   </head>
   <body>
-    <pre id="out"></pre>
-    <button id="web3auth-login">Login</button>
+    <div id="main" style="overflow:auto;padding:8px;position:fixed;top:0;left:0;right:0;bottom:60vh;">
+      <pre id="out"></pre>
+      <pre id="address-output"></pre>
+      <pre id="tokens-output"></pre>
+      <button id="web3auth-login">Login</button>
+    </div>
+    <div id="state-output" style="position:fixed;bottom:0;left:0;right:0;height:60vh;overflow:auto;background:#111;color:#0f0;font-family:monospace;font-size:12px;padding:8px;white-space:pre-wrap;display:none;"></div>
     <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>
