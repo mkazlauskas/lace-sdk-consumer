@@ -1,0 +1,18 @@
+{
+  "name": "lace-sdk-consumer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lace-sdk": "file:../../Code/iog/lace-platform-jj/apps/lace-sdk",
+    "@web3auth/modal": "^9.0.0",
+    "@web3auth/base": "^9.0.0",
+    "@web3auth/base-provider": "^9.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.0"
+  }
+}
