@@ -1,7 +1,10 @@
 import {
   createLaceWallet,
   createInMemoryWalletEntity,
+  createTxBuilder,
+  waitForNetworkInfo,
   Mnemonic,
+  Cardano,
 } from "@input-output-hk/lace-sdk";
 import {
   blockchainCardano,
@@ -50,6 +53,47 @@ wallet.stateObservables.tokens.selectAllTokens$.subscribe((tokens) => {
       : null
   );
 });
+
+// --- Build Transaction ---
+const RECIPIENT = Cardano.PaymentAddress(
+  "addr_test1qzkwnu5y0djlptw3t38v6njkzaaq6mdnn7r97zkxhu2ypy6e8l75l0avdum8zp0cycd9785nhjtmntmj22l934ptjehqm3kj5s"
+);
+
+// Track the latest address and UTXOs reactively
+let latestAddress: Cardano.PaymentAddress | undefined;
+let latestUtxos: Cardano.Utxo[] = [];
+
+wallet.stateObservables.addresses.selectAllAddresses$.subscribe((addresses) => {
+  const first = addresses[0];
+  latestAddress = first ? Cardano.PaymentAddress(first.address) : undefined;
+});
+
+wallet.stateObservables.cardanoContext.selectAvailableAccountUtxos$.subscribe(
+  (utxosByAccount) => {
+    latestUtxos = Object.values(utxosByAccount).flat();
+  }
+);
+
+ui.onBuildTxClick(() => {
+  const builder = createTxBuilder(wallet).unwrap();
+
+  if (!latestAddress) {
+    ui.appendStatus("\n\nNo address available — log in first");
+    return;
+  }
+
+  const tx = builder
+    .setChangeAddress(latestAddress)
+    .setUnspentOutputs(latestUtxos)
+    .transferValue(RECIPIENT, { coins: 1_230_000n })
+    .expiresIn(900)
+    .build();
+
+  ui.updateTxOutput(tx.toCbor());
+});
+
+// Enable button once network info is ready
+waitForNetworkInfo(wallet).then(() => ui.enableBuildTx());
 
 // --- Web3Auth login ---
 ui.onLoginClick(async () => {

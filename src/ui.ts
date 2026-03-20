@@ -2,9 +2,9 @@ const out = document.getElementById("out")!;
 const stateOutput = document.getElementById("state-output")!;
 const addressEl = document.getElementById("address-output")!;
 const tokensEl = document.getElementById("tokens-output")!;
-const loginBtn = document.getElementById(
-  "web3auth-login"
-) as HTMLButtonElement;
+const loginBtn = document.getElementById("web3auth-login") as HTMLButtonElement;
+const buildTxBtn = document.getElementById("build-tx") as HTMLButtonElement;
+const txOutputEl = document.getElementById("tx-output")!;
 
 export const ui = {
   setStatus(text: string) {
@@ -24,13 +24,15 @@ export const ui = {
   },
 
   updateAddress(address: string | null) {
-    addressEl.textContent = address ? `Address: ${address}` : "No addresses yet";
+    addressEl.textContent = address
+      ? `Address: ${address}`
+      : "No addresses yet";
   },
 
   updateTokens(accountTokens: { count: number; json: string } | null) {
     tokensEl.textContent = accountTokens
       ? `Tokens (${accountTokens.count}):\n${accountTokens.json}`
-      : "No accounts yet";
+      : "No tokens yet";
   },
 
   onLoginClick(handler: () => Promise<void>) {
@@ -47,5 +49,24 @@ export const ui = {
         loginBtn.textContent = "Login";
       }
     });
+  },
+
+  enableBuildTx() {
+    buildTxBtn.disabled = false;
+  },
+
+  onBuildTxClick(handler: () => void) {
+    buildTxBtn.addEventListener("click", () => {
+      try {
+        handler();
+      } catch (err) {
+        console.error("Build tx failed:", err);
+        txOutputEl.textContent = `Error: ${err}`;
+      }
+    });
+  },
+
+  updateTxOutput(cbor: string) {
+    txOutputEl.textContent = `Transaction CBOR:\n${cbor}`;
   },
 };
