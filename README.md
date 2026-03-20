@@ -28,7 +28,7 @@ Get Blockfrost project IDs at [blockfrost.io](https://blockfrost.io/) and a Web3
 src/
   bootstrap.ts   Buffer polyfill (must run before any Web3Auth imports), then lazy-imports main
   config.ts      Feature flags and Blockfrost provider configuration
-  web3auth.ts    Web3Auth provider setup via createWebWeb3AuthProvider
+  web3auth.ts    Web3Auth setup — calls initModal/connect/getUserInfo directly, returns EntropyHex + userId
   main.ts        Creates headless wallet, subscribes to state observables, handles login flow
   ui.ts          DOM helpers (not SDK-specific)
 ```
@@ -38,7 +38,7 @@ src/
 1. **Bootstrap** (`bootstrap.ts`) — sets the global `Buffer` polyfill required by Web3Auth's `eccrypto` dependency, then dynamically imports the app
 2. **Config** (`config.ts`) — defines feature flags (`FEATURE_FLAG_CARDANO`, `FEATURE_FLAG_NETWORK_TYPE`) and Blockfrost provider settings per Cardano network
 3. **Wallet init** (`main.ts`) — calls `createLaceWallet` with modules (`featureDev`, `storageInMemory`, `blockchainCardano`, `cardanoProviderBlockfrost`, `cryptoCardanoSdk`) and subscribes to `stateObservables` for addresses and tokens
-4. **Login** (`main.ts`) — on button click, authenticates via Web3Auth, derives a BIP39 mnemonic with `deriveMnemonicFromKeyMaterial`, creates a wallet entity with `createInMemoryWalletEntity`, and dispatches it into the store
+4. **Login** (`main.ts`) — on button click, authenticates via Web3Auth directly (no wrapper), derives a BIP39 mnemonic with `Mnemonic.deriveFrom(entropyHex)`, creates a wallet entity with `createInMemoryWalletEntity`, and dispatches it into the store
 
 ## Vite Config
 

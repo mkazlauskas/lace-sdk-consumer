@@ -1,7 +1,7 @@
 import {
   createLaceWallet,
   createInMemoryWalletEntity,
-  deriveMnemonicFromKeyMaterial,
+  Mnemonic,
 } from "@input-output-hk/lace-sdk";
 import {
   blockchainCardano,
@@ -12,7 +12,7 @@ import {
 } from "@input-output-hk/lace-sdk/modules";
 import { config, featureFlags } from "./config";
 import { ui } from "./ui";
-import { getKeyMaterial } from "./web3auth";
+import { login } from "./web3auth";
 
 // --- Create headless wallet ---
 ui.setStatus("Creating wallet...");
@@ -53,8 +53,8 @@ wallet.stateObservables.tokens.selectAllTokens$.subscribe((tokens) => {
 
 // --- Web3Auth login ---
 ui.onLoginClick(async () => {
-  const keyMaterial = await getKeyMaterial();
-  const { mnemonicWords, userId } = deriveMnemonicFromKeyMaterial(keyMaterial);
+  const { entropyHex, userId } = await login();
+  const mnemonicWords = Mnemonic.deriveFrom(entropyHex);
   ui.appendStatus(
     `\n\nLogin OK: userId="${userId}", ${mnemonicWords.length} words`
   );
@@ -63,7 +63,7 @@ ui.onLoginClick(async () => {
   ui.appendStatus("\n\nCreating wallet entity...");
   const password = new Uint8Array(Buffer.from("password"));
   const walletEntity = await createInMemoryWalletEntity(wallet, {
-    mnemonicWords,
+    mnemonicWords: [...mnemonicWords],
     password,
     walletName: `Web3Auth ${userId}`,
   });
