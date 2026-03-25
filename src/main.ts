@@ -2,17 +2,15 @@ import {
   createLaceWallet,
   createInMemoryWalletEntity,
   createTxBuilder,
+  signCardanoTx,
+  submitCardanoTx,
   waitForNetworkInfo,
   Mnemonic,
   Cardano,
+  ByteArray,
+  HexBytes,
+  m,
 } from "@input-output-hk/lace-sdk";
-import {
-  blockchainCardano,
-  cardanoProviderBlockfrost,
-  featureDev,
-  storageInMemory,
-  cryptoCardanoSdk,
-} from "@input-output-hk/lace-sdk/modules";
 import { config, featureFlags } from "./config";
 import { ui } from "./ui";
 import { login } from "./web3auth";
@@ -22,11 +20,11 @@ ui.setStatus("Creating wallet...");
 
 const wallet = await createLaceWallet({
   modules: [
-    featureDev,
-    storageInMemory,
-    blockchainCardano,
-    cardanoProviderBlockfrost,
-    cryptoCardanoSdk,
+    m.featureDev,
+    m.storageInMemory,
+    m.blockchainCardano,
+    m.cardanoProviderBlockfrost,
+    m.cryptoCardanoSdk,
   ] as const,
   environment: "development",
   featureFlags,
@@ -74,6 +72,9 @@ wallet.stateObservables.cardanoContext.selectAvailableAccountUtxos$.subscribe(
   }
 );
 
+let lastBuiltTxCbor: string | undefined;
+let lastSignedTxCbor: string | undefined;
+
 ui.onBuildTxClick(() => {
   const builder = createTxBuilder(wallet).unwrap();
 
@@ -89,7 +90,49 @@ ui.onBuildTxClick(() => {
     .expiresIn(900)
     .build();
 
-  ui.updateTxOutput(tx.toCbor());
+  lastBuiltTxCbor = tx.toCbor();
+  ui.updateTxOutput(lastBuiltTxCbor);
+  ui.enableSignTx();
+});
+
+ui.onSignTxClick(async () => {
+  if (!lastBuiltTxCbor) {
+    ui.appendStatus("\n\nNo transaction to sign — build one first");
+    return;
+  }
+
+  ui.appendStatus("\n\nSigning transaction...");
+  const result = await signCardanoTx(wallet, {
+    serializedTx: HexBytes(lastBuiltTxCbor),
+    password: ByteArray.fromUTF8("password"),
+  });
+
+  if (result.isOk()) {
+    lastSignedTxCbor = result.value.serializedTx;
+    ui.appendStatus(`\nSigned! (${result.value.signatureCount} signature(s))`);
+    ui.updateTxOutput(result.value.serializedTx);
+    ui.enableSubmitTx();
+  } else {
+    ui.appendStatus(`\nSigning failed: ${result.error.message}`);
+  }
+});
+
+ui.onSubmitTxClick(async () => {
+  if (!lastSignedTxCbor) {
+    ui.appendStatus("\n\nNo signed transaction to submit — sign one first");
+    return;
+  }
+
+  ui.appendStatus("\n\nSubmitting transaction...");
+  const result = await submitCardanoTx(wallet, {
+    serializedTx: HexBytes(lastSignedTxCbor),
+  });
+
+  if (result.isOk()) {
+    ui.appendStatus(`\nSubmitted! txId=${result.value.txId}`);
+  } else {
+    ui.appendStatus(`\nSubmission failed: ${result.error.message}`);
+  }
 });
 
 // Enable button once network info is ready
@@ -105,7 +148,7 @@ ui.onLoginClick(async () => {
 
   // Create an in-memory wallet entity from the mnemonic
   ui.appendStatus("\n\nCreating wallet entity...");
-  const password = new Uint8Array(Buffer.from("password"));
+  const password = ByteArray.fromUTF8("password");
   const walletEntity = await createInMemoryWalletEntity(wallet, {
     mnemonicWords: [...mnemonicWords],
     password,

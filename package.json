@@ -8,7 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@input-output-hk/lace-sdk": "0.1.0-dev.5",
+    "@input-output-hk/lace-sdk": "0.1.0-dev.6",
     "@web3auth/base": "^9.0.0",
     "@web3auth/base-provider": "^9.0.0",
     "@web3auth/modal": "^9.0.0",

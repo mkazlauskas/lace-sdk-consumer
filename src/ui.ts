@@ -4,6 +4,8 @@ const addressEl = document.getElementById("address-output")!;
 const tokensEl = document.getElementById("tokens-output")!;
 const loginBtn = document.getElementById("web3auth-login") as HTMLButtonElement;
 const buildTxBtn = document.getElementById("build-tx") as HTMLButtonElement;
+const signTxBtn = document.getElementById("sign-tx") as HTMLButtonElement;
+const submitTxBtn = document.getElementById("submit-tx") as HTMLButtonElement;
 const txOutputEl = document.getElementById("tx-output")!;
 
 export const ui = {
@@ -62,6 +64,46 @@ export const ui = {
       } catch (err) {
         console.error("Build tx failed:", err);
         txOutputEl.textContent = `Error: ${err}`;
+      }
+    });
+  },
+
+  enableSignTx() {
+    signTxBtn.disabled = false;
+  },
+
+  onSignTxClick(handler: () => Promise<void>) {
+    signTxBtn.addEventListener("click", async () => {
+      signTxBtn.disabled = true;
+      signTxBtn.textContent = "Signing...";
+      try {
+        await handler();
+      } catch (err) {
+        console.error("Sign tx failed:", err);
+        txOutputEl.textContent = `Error: ${err}`;
+      } finally {
+        signTxBtn.disabled = false;
+        signTxBtn.textContent = "Sign Transaction";
+      }
+    });
+  },
+
+  enableSubmitTx() {
+    submitTxBtn.disabled = false;
+  },
+
+  onSubmitTxClick(handler: () => Promise<void>) {
+    submitTxBtn.addEventListener("click", async () => {
+      submitTxBtn.disabled = true;
+      submitTxBtn.textContent = "Submitting...";
+      try {
+        await handler();
+      } catch (err) {
+        console.error("Submit tx failed:", err);
+        txOutputEl.textContent = `Error: ${err}`;
+      } finally {
+        submitTxBtn.disabled = false;
+        submitTxBtn.textContent = "Submit Transaction";
       }
     });
   },

@@ -3,17 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <title>lace-sdk consumer</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      body { display: flex; flex-direction: column; }
+      pre { white-space: pre-wrap; word-break: break-all; margin: 0; }
+    </style>
   </head>
   <body>
-    <div id="main" style="overflow:auto;padding:8px;position:fixed;top:0;left:0;right:0;bottom:60vh;">
+    <div id="main" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:8px;">
       <pre id="out"></pre>
       <pre id="address-output"></pre>
-      <pre id="tokens-output"></pre>
       <button id="web3auth-login">Login</button>
       <button id="build-tx" disabled>Build Transaction</button>
+      <button id="sign-tx" disabled>Sign Transaction</button>
+      <button id="submit-tx" disabled>Submit Transaction</button>
       <pre id="tx-output"></pre>
+      <pre id="tokens-output"></pre>
     </div>
-    <div id="state-output" style="position:fixed;bottom:0;left:0;right:0;height:60vh;overflow:auto;background:#111;color:#0f0;font-family:monospace;font-size:12px;padding:8px;white-space:pre-wrap;display:none;"></div>
+    <div id="state-output" style="flex:1;overflow:auto;background:#111;color:#0f0;font-family:monospace;font-size:12px;padding:8px;white-space:pre-wrap;display:none;"></div>
     <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>
