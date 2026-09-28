@@ -2,11 +2,14 @@ const out = document.getElementById("out")!;
 const stateOutput = document.getElementById("state-output")!;
 const addressEl = document.getElementById("address-output")!;
 const tokensEl = document.getElementById("tokens-output")!;
-const loginBtn = document.getElementById("web3auth-login") as HTMLButtonElement;
+const createBtn = document.getElementById("create-passkey") as HTMLButtonElement;
+const openBtn = document.getElementById("open-passkey") as HTMLButtonElement;
 const buildTxBtn = document.getElementById("build-tx") as HTMLButtonElement;
 const signTxBtn = document.getElementById("sign-tx") as HTMLButtonElement;
 const submitTxBtn = document.getElementById("submit-tx") as HTMLButtonElement;
 const txOutputEl = document.getElementById("tx-output")!;
+const reviewEl = document.getElementById("tx-review")!;
+const reviewCheck = document.getElementById("review-confirm") as HTMLInputElement;
 
 export const ui = {
   setStatus(text: string) {
@@ -37,18 +40,35 @@ export const ui = {
       : "No tokens yet";
   },
 
-  onLoginClick(handler: () => Promise<void>) {
-    loginBtn.addEventListener("click", async () => {
-      loginBtn.disabled = true;
-      loginBtn.textContent = "Logging in...";
+  setWalletMode(canCreate: boolean) {
+    createBtn.hidden = !canCreate;
+    openBtn.hidden = false;
+  },
+
+  onCreateClick(handler: () => Promise<void>) {
+    createBtn.addEventListener("click", async () => {
+      createBtn.disabled = true;
       try {
         await handler();
       } catch (err) {
-        console.error("Login failed:", err);
-        ui.appendStatus(`\n\nLogin error: ${err}`);
+        console.error("Passkey create failed:", err);
+        ui.appendStatus(`\n\nCreate error: ${err}`);
       } finally {
-        loginBtn.disabled = false;
-        loginBtn.textContent = "Login";
+        createBtn.disabled = false;
+      }
+    });
+  },
+
+  onOpenClick(handler: () => Promise<void>) {
+    openBtn.addEventListener("click", async () => {
+      openBtn.disabled = true;
+      try {
+        await handler();
+      } catch (err) {
+        console.error("Passkey open failed:", err);
+        ui.appendStatus(`\n\nOpen error: ${err}`);
+      } finally {
+        openBtn.disabled = false;
       }
     });
   },
@@ -57,10 +77,10 @@ export const ui = {
     buildTxBtn.disabled = false;
   },
 
-  onBuildTxClick(handler: () => void) {
-    buildTxBtn.addEventListener("click", () => {
+  onBuildTxClick(handler: () => Promise<void>) {
+    buildTxBtn.addEventListener("click", async () => {
       try {
-        handler();
+        await handler();
       } catch (err) {
         console.error("Build tx failed:", err);
         txOutputEl.textContent = `Error: ${err}`;
@@ -69,7 +89,19 @@ export const ui = {
   },
 
   enableSignTx() {
-    signTxBtn.disabled = false;
+    signTxBtn.disabled = !reviewCheck.checked;
+  },
+
+  showTxReview(details: { recipient: string; amount: string; changeAddress: string; inputCount: number; fee: string }) {
+    reviewEl.hidden = false;
+    reviewEl.textContent = `Review Preprod transaction before passkey signing:\nRecipient: ${details.recipient}\nAmount: ${details.amount}\nChange: ${details.changeAddress}\nSelected inputs: ${details.inputCount}\nFee: ${details.fee}\nCheck the transaction CBOR below before approval.`;
+    reviewCheck.checked = false;
+    signTxBtn.disabled = true;
+    submitTxBtn.disabled = true;
+  },
+
+  isTxReviewed() {
+    return !reviewEl.hidden && reviewCheck.checked;
   },
 
   onSignTxClick(handler: () => Promise<void>) {
@@ -112,3 +144,7 @@ export const ui = {
     txOutputEl.textContent = `Transaction CBOR:\n${cbor}`;
   },
 };
+
+reviewCheck.addEventListener("change", () => {
+  signTxBtn.disabled = !reviewCheck.checked;
+});

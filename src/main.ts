@@ -1,23 +1,41 @@
 import {
   createLaceWallet,
-  createInMemoryWalletEntity,
   createTxBuilder,
   signCardanoTx,
   submitCardanoTx,
   waitForNetworkInfo,
-  Mnemonic,
   Cardano,
-  ByteArray,
   HexBytes,
   m,
-} from "@input-output-hk/lace-sdk";
+  createPasskeyKeySource,
+  createPasskeyVaultModule,
+  createPasskeyWalletEntity,
+} from "@input-output-hk/lace-sdk/cardano";
 import { config, featureFlags } from "./config";
 import { ui } from "./ui";
-import { login } from "./web3auth";
+import { BINDING_KEY, readBinding } from "./binding";
+
+if (location.protocol !== "http:" || location.hostname !== "localhost") {
+  throw new Error("This passkey wallet requires http://localhost (RP ID localhost)");
+}
+let savedBinding: ReturnType<typeof readBinding>;
+try {
+  savedBinding = readBinding(localStorage);
+} catch (error) {
+  ui.setStatus(String(error));
+  throw error;
+}
+let walletOpen = false;
+let networkReady = false;
 
 // --- Create headless wallet ---
 ui.setStatus("Creating wallet...");
 
+const keySource = createPasskeyKeySource({
+  rpId: "localhost",
+  rpName: "Lace SDK consumer",
+  credentialId: savedBinding?.credentialId,
+});
 const wallet = await createLaceWallet({
   modules: [
     m.featureDev,
@@ -25,13 +43,23 @@ const wallet = await createLaceWallet({
     m.blockchainCardano,
     m.cardanoProviderBlockfrost,
     m.cryptoCardanoSdk,
+    createPasskeyVaultModule({ keySource }),
   ] as const,
   environment: "development",
   featureFlags,
   config,
 });
 
+function addPreprodWallet(entity: Awaited<ReturnType<typeof createPasskeyWalletEntity>>["entity"]) {
+  // SDK excludes mainnet, but can still include Preview. Restrict the
+  // in-memory wallet to configured Preprod before selecting an active account.
+  const accounts = entity.accounts.filter((account) => account.blockchainName === "Cardano" && account.blockchainNetworkId === "cardano-1");
+  if (accounts.length !== 1) throw new Error("Expected exactly one Cardano Preprod account");
+  wallet.dispatch("wallets.addWallet", { ...entity, accounts });
+}
+
 ui.setStatus("Lace initialized");
+ui.setWalletMode(savedBinding === null);
 ui.showStateOutput();
 setInterval(() => {
   ui.updateState(wallet.getState());
@@ -75,7 +103,8 @@ wallet.stateObservables.cardanoContext.selectAvailableAccountUtxos$.subscribe(
 let lastBuiltTxCbor: string | undefined;
 let lastSignedTxCbor: string | undefined;
 
-ui.onBuildTxClick(() => {
+ui.onBuildTxClick(async () => {
+  if (!walletOpen) throw new Error("Open the saved passkey wallet first");
   const builder = createTxBuilder(wallet).unwrap();
 
   if (!latestAddress) {
@@ -90,8 +119,18 @@ ui.onBuildTxClick(() => {
     .expiresIn(900)
     .build();
 
-  lastBuiltTxCbor = tx.toCbor();
-  ui.updateTxOutput(lastBuiltTxCbor);
+  const builtTx = await tx;
+  lastBuiltTxCbor = builtTx.toCbor();
+  lastSignedTxCbor = undefined;
+  ui.updateTxOutput(builtTx.toCbor());
+  const body = builtTx.body().toCore();
+  ui.showTxReview({
+    recipient: RECIPIENT,
+    amount: "1.23 ADA",
+    changeAddress: latestAddress,
+    inputCount: body.inputs.length,
+    fee: `${Number(body.fee) / 1_000_000} ADA`,
+  });
   ui.enableSignTx();
 });
 
@@ -100,11 +139,11 @@ ui.onSignTxClick(async () => {
     ui.appendStatus("\n\nNo transaction to sign — build one first");
     return;
   }
+  if (!walletOpen || !ui.isTxReviewed()) throw new Error("Review the transaction before signing");
 
   ui.appendStatus("\n\nSigning transaction...");
   const result = await signCardanoTx(wallet, {
     serializedTx: HexBytes(lastBuiltTxCbor),
-    password: ByteArray.fromUTF8("password"),
   });
 
   if (result.isOk()) {
@@ -136,26 +175,40 @@ ui.onSubmitTxClick(async () => {
 });
 
 // Enable button once network info is ready
-waitForNetworkInfo(wallet).then(() => ui.enableBuildTx());
+waitForNetworkInfo(wallet).then(() => {
+  networkReady = true;
+  if (walletOpen) ui.enableBuildTx();
+}).catch((error) => ui.appendStatus(`\nNetwork info failed: ${error}`));
 
-// --- Web3Auth login ---
-ui.onLoginClick(async () => {
-  const { entropyHex, userId } = await login();
-  const mnemonicWords = Mnemonic.deriveFrom(entropyHex);
-  ui.appendStatus(
-    `\n\nLogin OK: userId="${userId}", ${mnemonicWords.length} words`
-  );
-
-  // Create an in-memory wallet entity from the mnemonic
-  ui.appendStatus("\n\nCreating wallet entity...");
-  const password = ByteArray.fromUTF8("password");
-  const walletEntity = await createInMemoryWalletEntity(wallet, {
-    mnemonicWords: [...mnemonicWords],
-    password,
-    walletName: `Web3Auth ${userId}`,
+ui.onCreateClick(async () => {
+  if (readBinding(localStorage)) throw new Error("A wallet is already bound here. Open it instead.");
+  // Registration and the first PRF assertion are separate browser prompts.
+  await keySource.ensureCredential();
+  const { entity, binding } = await createPasskeyWalletEntity(wallet, {
+    keySource,
+    walletName: "Passkey Preprod",
   });
+  localStorage.setItem(BINDING_KEY, JSON.stringify(binding));
+  addPreprodWallet(entity);
+  walletOpen = true;
+  ui.setWalletMode(false);
+  if (networkReady) ui.enableBuildTx();
+  ui.appendStatus(`\nPasskey wallet created. walletId=${entity.walletId}`);
+});
 
-  // Dispatch it into the store
-  wallet.dispatch("wallets.addWallet", walletEntity);
-  ui.appendStatus(`\nWallet added! walletId=${walletEntity.walletId}`);
+ui.onOpenClick(async () => {
+  if (walletOpen) throw new Error("Wallet is already open");
+  const binding = readBinding(localStorage);
+  // Explicit open can discover a synced credential after storage is cleared.
+  // With a saved binding, the SDK pins the credential and checks its fingerprint.
+  const { entity, binding: openedBinding } = await createPasskeyWalletEntity(wallet, {
+    keySource,
+    walletName: "Passkey Preprod",
+    expectedBinding: binding ?? undefined,
+  });
+  addPreprodWallet(entity);
+  if (!binding) localStorage.setItem(BINDING_KEY, JSON.stringify(openedBinding));
+  walletOpen = true;
+  if (networkReady) ui.enableBuildTx();
+  ui.appendStatus(`\nPasskey wallet opened. walletId=${entity.walletId}`);
 });
