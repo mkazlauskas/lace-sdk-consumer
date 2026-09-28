@@ -13,8 +13,13 @@
     <div id="main" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:8px;">
       <pre id="out"></pre>
       <pre id="address-output"></pre>
-      <button id="web3auth-login">Login</button>
+      <p>Cardano Preprod only. This demo uses an unpublished SDK tarball; final evidence needs a published prerelease. No recovery phrase export.</p>
+      <p>First signup asks twice: create passkey, then approve a PRF assertion. Keep the same passkey available on other devices.</p>
+      <button id="create-passkey" hidden>Create passkey wallet</button>
+      <button id="open-passkey" hidden>Open passkey wallet</button>
       <button id="build-tx" disabled>Build Transaction</button>
+      <pre id="tx-review" hidden></pre>
+      <label><input id="review-confirm" type="checkbox" /> I reviewed the Preprod transaction and recipient</label>
       <button id="sign-tx" disabled>Sign Transaction</button>
       <button id="submit-tx" disabled>Submit Transaction</button>
       <pre id="tx-output"></pre>

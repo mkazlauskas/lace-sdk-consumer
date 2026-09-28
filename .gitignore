@@ -2,3 +2,5 @@ node_modules
 dist
 .env
 .npmrc
+test-results
+playwright-report
