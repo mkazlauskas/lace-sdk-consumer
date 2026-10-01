@@ -124,6 +124,10 @@ export const ui = {
     submitTxBtn.disabled = false;
   },
 
+  disableSubmitTx() {
+    submitTxBtn.disabled = true;
+  },
+
   onSubmitTxClick(handler: () => Promise<void>) {
     submitTxBtn.addEventListener("click", async () => {
       submitTxBtn.disabled = true;

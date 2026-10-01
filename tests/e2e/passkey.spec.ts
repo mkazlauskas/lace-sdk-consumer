@@ -1,157 +1,143 @@
-import { expect, test, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
+import { resolve, extname } from "node:path";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { mockBlockfrost } from "./blockfrost";
 
-const BINDING_KEY = "lace-passkey-wallet-v1";
+// Serve the real PR signer build at an intercepted HTTPS origin. This tests
+// cross-origin messaging and real signing, without depending on deployment.
+const signerOrigin = "https://passkey-preview.lace.io";
+const bindingKey = `lace-remote-passkey-wallet-v1:${signerOrigin}:0`;
+const signerDist = resolve(process.env.SIGNER_DIST ?? "../lace-platform/.claude/worktrees/pr-2805/apps/lace-passkey-signer/dist");
+const mime: Record<string, string> = { ".js": "application/javascript", ".css": "text/css", ".wasm": "application/wasm", ".html": "text/html", ".png": "image/png", ".otf": "font/otf", ".ttf": "font/ttf" };
 
-async function authenticator(page: Page) {
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-      hasPrf: true,
-    },
-  });
-  await page.addInitScript(() => {
-    const nativeGet = CredentialsContainer.prototype.get;
-    Object.defineProperty(window, "__prfChecks", { value: { assertions: 0, results: 0 }, writable: false });
-    CredentialsContainer.prototype.get = async function (options) {
-      const credential = await nativeGet.call(this, options);
-      if (options?.publicKey) {
-        window.__prfChecks.assertions++;
-        const results = (credential as PublicKeyCredential | null)?.getClientExtensionResults().prf?.results;
-        if (results?.first?.byteLength === 32 && results?.second?.byteLength === 32) window.__prfChecks.results++;
-      }
+async function prepare(context: BrowserContext) {
+  // CDP cannot export/import a credential's PRF secret across popup targets.
+  // Simulate only PRF output, deterministically from the virtual credential and
+  // requested salts. Signer derivation, account checks and signatures stay real.
+  await context.addInitScript(origin => {
+    if (location.origin !== origin) return;
+    const get = navigator.credentials.get.bind(navigator.credentials);
+    navigator.credentials.get = async options => {
+      const credential = await get(options) as PublicKeyCredential | null;
+      if (!credential || !options?.publicKey?.extensions?.prf) return credential;
+      const prf = options.publicKey.extensions.prf;
+      const salts = prf.eval ?? Object.values(prf.evalByCredential ?? {})[0];
+      if (!salts) throw new Error("Missing PRF salts");
+      const derive = async (salt: BufferSource) => {
+        const saltBytes = ArrayBuffer.isView(salt) ? new Uint8Array(salt.buffer, salt.byteOffset, salt.byteLength) : new Uint8Array(salt);
+        const bytes = new Uint8Array(credential.rawId.byteLength + saltBytes.byteLength);
+        bytes.set(new Uint8Array(credential.rawId));
+        bytes.set(saltBytes, credential.rawId.byteLength);
+        return crypto.subtle.digest("SHA-256", bytes);
+      };
+      const results = { first: await derive(salts.first), second: salts.second ? await derive(salts.second) : undefined };
+      credential.getClientExtensionResults = () => ({ prf: { results } });
       return credential;
     };
+  }, signerOrigin);
+  await context.route(`${signerOrigin}/**`, async route => {
+    const path = new URL(route.request().url()).pathname;
+    const file = resolve(signerDist, `.${path === "/" ? "/index.html" : path}`);
+    if (!file.startsWith(`${signerDist}/`)) return route.abort();
+    await route.fulfill({ body: await readFile(file), contentType: mime[extname(file)] ?? "application/octet-stream" });
   });
-  return { cdp, authenticatorId };
 }
 
-declare global {
-  interface Window { __prfChecks: { assertions: number; results: number } }
+type Credential = { credentialId: string; isResidentCredential: boolean; rpId?: string; privateKey: string; userHandle?: string; signCount: number };
+
+async function popup(page: Page, button: string, credentials: Credential[] = []) {
+  const opened = page.waitForEvent("popup");
+  await page.getByRole("button", { name: button, exact: true }).click();
+  const signer = await opened;
+  await signer.bringToFront();
+  const cdp = await page.context().newCDPSession(signer);
+  await cdp.send("WebAuthn.enable");
+  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true },
+  });
+  for (const credential of credentials) await cdp.send("WebAuthn.addCredential", { authenticatorId, credential });
+  return { signer, cdp, authenticatorId };
 }
 
 async function create(page: Page) {
-  const startupError = new Promise<never>((_, reject) => page.once("pageerror", reject));
   await page.goto("/");
-  await Promise.race([page.getByRole("button", { name: "Create passkey wallet" }).click(), startupError]);
-  await expect(page.locator("#out")).toContainText("Passkey wallet created", { timeout: 25_000 });
-  try {
-    await expect(page.locator("#address-output")).toContainText("addr_test1");
-  } catch (error) {
-    const state = JSON.parse(await page.locator("#state-output").innerText());
-    console.error("Address diagnostics:", {
-      accountNetworks: Object.values(state.wallets.entities).flatMap((wallet: any) => wallet.accounts.map((account: any) => account.blockchainNetworkId)),
-      active: state.wallets.activeAccountContext,
-      addresses: state.addresses.addresses.length,
-      sync: state.sync.syncStatusByAccount,
-    });
-    throw error;
-  }
+  const { signer, cdp, authenticatorId } = await popup(page, "Create passkey wallet");
+  await signer.getByRole("button", { name: "Create a new wallet", exact: true }).click();
+  await expect(signer.getByText("Share your Cardano account", { exact: true })).toBeVisible();
+  const { credentials } = await cdp.send("WebAuthn.getCredentials", { authenticatorId });
+  expect(credentials[0].rpId).toBe("passkey-preview.lace.io");
+  await signer.getByRole("button", { name: "Approve with passkey", exact: true }).click();
+  await expect(page.locator("#out")).toContainText("Passkey wallet created/connected");
+  await expect(page.locator("#address-output")).toContainText("addr_test1");
   const address = await page.locator("#address-output").innerText();
-  await expect.poll(async () => Object.keys(JSON.parse(await page.locator("#state-output").innerText()).wallets.entities).length).toBe(1);
-  const state = JSON.parse(await page.locator("#state-output").innerText());
-  const [entity] = Object.values(state.wallets.entities) as Array<{ type: string; accounts: Array<{ blockchainNetworkId: string }>; encryptedRecoveryPhrase?: string }>;
-  expect(entity.type).toBe("LazyInMemory");
-  expect(entity.accounts.map((account) => account.blockchainNetworkId)).toEqual(["cardano-1"]);
-  expect(entity.encryptedRecoveryPhrase).toBeUndefined();
-  const binding = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), BINDING_KEY);
-  expect(binding).toEqual({
-    credentialId: expect.stringMatching(/^[A-Za-z0-9_-]+$/),
-    rpId: "localhost",
-    recipeVersion: "v1",
-    fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
-  });
-  const prf = await page.evaluate(() => window.__prfChecks);
-  expect(prf.assertions).toBe(1);
-  expect(prf.results).toBe(1); // Verify actual browser PRF outputs, not only hasPrf capability.
-  console.log("Created public address:", address, "PRF assertions/results:", prf);
-  return { address, binding };
+  const publicKey = await page.evaluate(key => JSON.parse(localStorage.getItem(key)!), bindingKey);
+  expect(publicKey).toMatch(/^[0-9a-f]{128}$/);
+  return { credentials, address, publicKey };
 }
 
-test("create, reload and storage clear preserve bound address", async ({ page }) => {
-  page.on("pageerror", (error) => console.error("Browser error:", error.message));
-  await authenticator(page);
+test.beforeEach(async ({ context, page }) => {
+  await prepare(context);
+  // Any consumer-side WebAuthn invocation is an isolation regression.
+  await page.addInitScript(() => {
+    for (const method of ["create", "get"] as const) {
+      Object.defineProperty(navigator.credentials, method, { value: () => { throw new Error("Consumer must not access passkeys"); } });
+    }
+  });
+});
+
+test("hosted create, reopen, recovery and signing keep keys on signer", async ({ page }) => {
   const blockfrost = await mockBlockfrost(page);
-  let created: Awaited<ReturnType<typeof create>>;
-  try {
-    created = await create(page);
-  } catch (error) {
-    console.error("Blockfrost requests:", blockfrost.requests);
-    throw error;
-  }
-  const { address, binding } = created;
-  await page.reload();
-  await expect(page.locator("#address-output")).not.toContainText("addr_test1");
-  await page.getByRole("button", { name: "Open passkey wallet" }).click();
-  await expect(page.locator("#address-output")).toHaveText(address);
-  expect(await page.evaluate(() => window.__prfChecks)).toEqual({ assertions: 1, results: 1 });
-
-  await page.evaluate(() => localStorage.clear());
-  await page.reload();
-  await expect(page.getByRole("button", { name: "Create passkey wallet" })).toBeVisible();
-  await expect(page.locator("#address-output")).not.toContainText("addr_test1");
-  await page.getByRole("button", { name: "Open passkey wallet" }).click();
-  await expect(page.locator("#address-output")).toHaveText(address);
-  expect(await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), BINDING_KEY)).toEqual(binding);
-  expect(await page.evaluate(() => window.__prfChecks)).toEqual({ assertions: 1, results: 1 });
-});
-
-test("second credential with first wallet fingerprint fails closed", async ({ page }) => {
-  await authenticator(page);
-  await mockBlockfrost(page);
-  const first = await create(page);
-  await page.evaluate(() => localStorage.clear());
-  await page.reload();
-  const second = await create(page);
-  expect(second.binding.credentialId).not.toBe(first.binding.credentialId);
-  await page.evaluate(({ key, firstBinding, secondId }) => {
-    localStorage.setItem(key, JSON.stringify({ ...firstBinding, credentialId: secondId }));
-  }, { key: BINDING_KEY, firstBinding: first.binding, secondId: second.binding.credentialId });
-  await page.reload();
-  await page.getByRole("button", { name: "Open passkey wallet" }).click();
-  await expect(page.locator("#out")).toContainText("PasskeyWalletMismatchError");
-  await expect(page.locator("#address-output")).not.toContainText("addr_test1");
-  await expect(page.getByRole("button", { name: "Build Transaction" })).toBeDisabled();
-  expect(await page.evaluate(() => window.__prfChecks)).toEqual({ assertions: 1, results: 1 });
-});
-
-test("CDP authenticator returns two real PRF outputs", async ({ page }) => {
-  await authenticator(page);
-  await page.goto("/tests/e2e/prf-probe.html");
-  await page.getByRole("button", { name: "Probe WebAuthn PRF" }).click();
-  await expect(page.locator("#result")).toHaveText("PRF supported");
-  expect(await page.evaluate(() => window.__prfChecks)).toEqual({ assertions: 1, results: 1 });
-});
-
-test("build and sign after review uses exactly one fresh assertion without submitting", async ({ page }) => {
-  await authenticator(page);
-  const blockfrost = await mockBlockfrost(page);
-  const { address } = await create(page);
+  const { credentials, address, publicKey } = await create(page);
   blockfrost.fund(address);
   await page.reload();
-  await page.getByRole("button", { name: "Open passkey wallet" }).click();
-  await expect(page.getByRole("button", { name: "Build Transaction" })).toBeEnabled();
-  await page.getByRole("button", { name: "Build Transaction" }).click();
+  await expect(page.locator("#address-output")).not.toContainText("addr_test1");
+  const reopened = await popup(page, "Open passkey wallet", credentials);
+  await reopened.signer.getByRole("button", { name: "Approve with passkey", exact: true }).click();
+  await expect(page.locator("#address-output")).toHaveText(address);
+  await expect(page.getByRole("button", { name: "Build Transaction", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Build Transaction", exact: true }).click();
   await expect(page.locator("#tx-review")).toContainText("Fee:");
-  const before = await page.evaluate(() => window.__prfChecks);
-  await page.getByRole("checkbox", { name: "I reviewed the Preprod transaction and recipient" }).check();
-  await page.getByRole("button", { name: "Sign Transaction" }).click();
+  await page.getByRole("checkbox").check();
+  const signing = await popup(page, "Sign Transaction", credentials);
+  await expect(signing.signer.getByText("Sign a transaction", { exact: true })).toBeVisible();
+  await signing.signer.getByRole("button", { name: "Approve with passkey", exact: true }).click();
   await expect(page.locator("#out")).toContainText("Signed! (1 signature(s))");
-  const after = await page.evaluate(() => window.__prfChecks);
-  expect(after).toEqual({ assertions: before.assertions + 1, results: before.results + 1 });
-  await page.getByRole("button", { name: "Sign Transaction" }).click();
-  await expect(page.locator("#out")).toContainText(/Signed! \(1 signature\(s\)\)[\s\S]*Signed! \(1 signature\(s\)\)/);
-  const afterSecond = await page.evaluate(() => window.__prfChecks);
-  expect(afterSecond).toEqual({ assertions: after.assertions + 1, results: after.results + 1 });
-  await expect(page.getByRole("button", { name: "Submit Transaction" })).toBeEnabled();
-  await expect(page.locator("#out")).not.toContainText("Submitted!");
+  await expect(page.getByRole("button", { name: "Submit Transaction", exact: true })).toBeEnabled();
   expect(blockfrost.submissions()).toBe(0);
-  console.log("Signed fixture transaction twice: 1 signature per call, PRF counts:", before, after, afterSecond, "submissions:", blockfrost.submissions());
+
+  const rejected = await popup(page, "Sign Transaction", credentials);
+  await rejected.signer.getByRole("button", { name: "Reject", exact: true }).click();
+  await expect(page.locator("#out")).toContainText("Signing failed:");
+  await expect(page.getByRole("button", { name: "Submit Transaction", exact: true })).toBeDisabled();
+
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  const recovered = await popup(page, "Open passkey wallet", credentials);
+  await recovered.signer.getByRole("button", { name: "Approve with passkey", exact: true }).click();
+  await expect(page.locator("#address-output")).toHaveText(address);
+  expect(await page.evaluate(key => JSON.parse(localStorage.getItem(key)!), bindingKey)).toBe(publicKey);
+});
+
+test("wrong persisted public key fails closed", async ({ page }) => {
+  await mockBlockfrost(page);
+  const { credentials } = await create(page);
+  await page.evaluate(key => localStorage.setItem(key, JSON.stringify("a".repeat(128))), bindingKey);
+  await page.reload();
+  const reopened = await popup(page, "Open passkey wallet", credentials);
+  await reopened.signer.getByRole("button", { name: "Approve with passkey", exact: true }).click();
+  await expect(page.locator("#out")).toContainText("PasskeyWalletMismatchError");
+  await expect(page.locator("#address-output")).not.toContainText("addr_test1");
+  await expect(page.getByRole("button", { name: "Build Transaction", exact: true })).toBeDisabled();
+});
+
+test("closed popup can be retried without creating a wallet", async ({ page }) => {
+  await mockBlockfrost(page);
+  await page.goto("/");
+  const first = await popup(page, "Create passkey wallet");
+  await first.signer.close();
+  await expect(page.locator("#out")).toContainText("Create error:");
+  await expect(page.locator("#address-output")).not.toContainText("addr_test1");
+  const retry = await popup(page, "Create passkey wallet");
+  await expect(retry.signer.getByRole("button", { name: "Create a new wallet", exact: true })).toBeVisible();
+  await retry.signer.close();
 });

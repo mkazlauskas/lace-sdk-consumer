@@ -7,20 +7,20 @@ import {
   Cardano,
   HexBytes,
   m,
-  createPasskeyKeySource,
-  createPasskeyVaultModule,
-  createPasskeyWalletEntity,
+  createRemotePasskeySigner,
+  createRemotePasskeyWalletEntity,
 } from "@input-output-hk/lace-sdk/cardano";
 import { config, featureFlags } from "./config";
 import { ui } from "./ui";
-import { BINDING_KEY, readBinding } from "./binding";
+import { bindingKey, readBinding } from "./binding";
 
-if (location.protocol !== "http:" || location.hostname !== "localhost") {
-  throw new Error("This passkey wallet requires http://localhost (RP ID localhost)");
+const signerUrl = import.meta.env.VITE_PASSKEY_SIGNER_URL || "https://passkey-preview.lace.io";
+if (new URL(signerUrl).protocol !== "https:") {
+  throw new Error("The hosted passkey signer requires an HTTPS URL");
 }
 let savedBinding: ReturnType<typeof readBinding>;
 try {
-  savedBinding = readBinding(localStorage);
+  savedBinding = readBinding(localStorage, signerUrl);
 } catch (error) {
   ui.setStatus(String(error));
   throw error;
@@ -31,11 +31,30 @@ let networkReady = false;
 // --- Create headless wallet ---
 ui.setStatus("Creating wallet...");
 
-const keySource = createPasskeyKeySource({
-  rpId: "localhost",
-  rpName: "Lace SDK consumer",
-  credentialId: savedBinding?.credentialId,
-});
+const signer = createRemotePasskeySigner({ signerUrl });
+let signerBusy = false;
+
+// Open before the first await so the click retains browser user activation.
+async function withSigner<T>(operation: () => Promise<T>): Promise<T> {
+  if (signerBusy) throw new Error("Finish the current signer request first");
+  signerBusy = true;
+  let connectionTimeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    signer.open();
+    await Promise.race([
+      signer.connect(),
+      new Promise<never>((_, reject) => {
+        connectionTimeout = setTimeout(() => reject(new Error("Signer connection timed out. Check VITE_PASSKEY_SIGNER_URL and the hosted deployment.")), 20_000);
+      }),
+    ]);
+    clearTimeout(connectionTimeout);
+    return await operation();
+  } finally {
+    clearTimeout(connectionTimeout);
+    signer.close();
+    signerBusy = false;
+  }
+}
 const wallet = await createLaceWallet({
   modules: [
     m.featureDev,
@@ -43,14 +62,14 @@ const wallet = await createLaceWallet({
     m.blockchainCardano,
     m.cardanoProviderBlockfrost,
     m.cryptoCardanoSdk,
-    createPasskeyVaultModule({ keySource }),
+    signer.cardanoVaultModule,
   ] as const,
   environment: "development",
   featureFlags,
   config,
 });
 
-function addPreprodWallet(entity: Awaited<ReturnType<typeof createPasskeyWalletEntity>>["entity"]) {
+function addPreprodWallet(entity: Awaited<ReturnType<typeof createRemotePasskeyWalletEntity>>["entity"]) {
   // SDK excludes mainnet, but can still include Preview. Restrict the
   // in-memory wallet to configured Preprod before selecting an active account.
   const accounts = entity.accounts.filter((account) => account.blockchainName === "Cardano" && account.blockchainNetworkId === "cardano-1");
@@ -58,7 +77,7 @@ function addPreprodWallet(entity: Awaited<ReturnType<typeof createPasskeyWalletE
   wallet.dispatch("wallets.addWallet", { ...entity, accounts });
 }
 
-ui.setStatus("Lace initialized");
+ui.setStatus(`Lace initialized. Signer: ${new URL(signerUrl).origin}`);
 ui.setWalletMode(savedBinding === null);
 ui.showStateOutput();
 setInterval(() => {
@@ -142,9 +161,12 @@ ui.onSignTxClick(async () => {
   if (!walletOpen || !ui.isTxReviewed()) throw new Error("Review the transaction before signing");
 
   ui.appendStatus("\n\nSigning transaction...");
-  const result = await signCardanoTx(wallet, {
-    serializedTx: HexBytes(lastBuiltTxCbor),
-  });
+  lastSignedTxCbor = undefined;
+  ui.disableSubmitTx();
+  const serializedTx = HexBytes(lastBuiltTxCbor);
+  const result = await withSigner(() => signCardanoTx(wallet, {
+    serializedTx,
+  }));
 
   if (result.isOk()) {
     lastSignedTxCbor = result.value.serializedTx;
@@ -180,35 +202,22 @@ waitForNetworkInfo(wallet).then(() => {
   if (walletOpen) ui.enableBuildTx();
 }).catch((error) => ui.appendStatus(`\nNetwork info failed: ${error}`));
 
-ui.onCreateClick(async () => {
-  if (readBinding(localStorage)) throw new Error("A wallet is already bound here. Open it instead.");
-  // Registration and the first PRF assertion are separate browser prompts.
-  await keySource.ensureCredential();
-  const { entity, binding } = await createPasskeyWalletEntity(wallet, {
-    keySource,
+async function openWallet(create: boolean): Promise<void> {
+  if (walletOpen) throw new Error("Wallet is already open");
+  const binding = readBinding(localStorage, signerUrl);
+  if (create && binding) throw new Error("A wallet is already bound here. Open it instead.");
+  const { entity, publicKey } = await withSigner(() => createRemotePasskeyWalletEntity({
+    signer,
     walletName: "Passkey Preprod",
-  });
-  localStorage.setItem(BINDING_KEY, JSON.stringify(binding));
+    expectedPublicKey: binding ?? undefined,
+  }));
+  if (!binding) localStorage.setItem(bindingKey(signerUrl), JSON.stringify(publicKey));
   addPreprodWallet(entity);
   walletOpen = true;
   ui.setWalletMode(false);
   if (networkReady) ui.enableBuildTx();
-  ui.appendStatus(`\nPasskey wallet created. walletId=${entity.walletId}`);
-});
+  ui.appendStatus(`\nPasskey wallet ${create ? "created/connected" : "opened"}. walletId=${entity.walletId}`);
+}
 
-ui.onOpenClick(async () => {
-  if (walletOpen) throw new Error("Wallet is already open");
-  const binding = readBinding(localStorage);
-  // Explicit open can discover a synced credential after storage is cleared.
-  // With a saved binding, the SDK pins the credential and checks its fingerprint.
-  const { entity, binding: openedBinding } = await createPasskeyWalletEntity(wallet, {
-    keySource,
-    walletName: "Passkey Preprod",
-    expectedBinding: binding ?? undefined,
-  });
-  addPreprodWallet(entity);
-  if (!binding) localStorage.setItem(BINDING_KEY, JSON.stringify(openedBinding));
-  walletOpen = true;
-  if (networkReady) ui.enableBuildTx();
-  ui.appendStatus(`\nPasskey wallet opened. walletId=${entity.walletId}`);
-});
+ui.onCreateClick(() => openWallet(true));
+ui.onOpenClick(() => openWallet(false));

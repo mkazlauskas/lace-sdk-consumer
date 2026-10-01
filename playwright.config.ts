@@ -11,6 +11,6 @@ export default defineConfig({
     url: `http://localhost:${process.env.E2E_PORT ?? "5198"}`,
     reuseExistingServer: false,
     timeout: 30_000,
-    env: { VITE_BLOCKFROST_PROJECT_ID_PREPROD: "playwright-fixture" },
+    env: { VITE_BLOCKFROST_PROJECT_ID_PREPROD: "playwright-fixture", VITE_PASSKEY_SIGNER_URL: "https://passkey-preview.lace.io" },
   },
 });

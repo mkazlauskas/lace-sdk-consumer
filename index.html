@@ -13,8 +13,8 @@
     <div id="main" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:8px;">
       <pre id="out"></pre>
       <pre id="address-output"></pre>
-      <p>Cardano Preprod only. This demo uses an unpublished SDK tarball; final evidence needs a published prerelease. No recovery phrase export.</p>
-      <p>First signup asks twice: create passkey, then approve a PRF assertion. Keep the same passkey available on other devices.</p>
+      <p>Cardano Preprod only. Passkeys and signing stay on the hosted Lace signer. This demo uses a local PR SDK build.</p>
+      <p>Create or open connects to the signer popup. On first use, choose an existing passkey or create a new wallet there, then approve sharing your Cardano account. An existing signer credential is reused. Each signature requires another approval and passkey prompt.</p>
       <button id="create-passkey" hidden>Create passkey wallet</button>
       <button id="open-passkey" hidden>Open passkey wallet</button>
       <button id="build-tx" disabled>Build Transaction</button>
