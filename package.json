@@ -11,7 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@input-output-hk/lace-sdk": "file:../../../../../tmp/opencode/input-output-hk-lace-sdk-0.1.0-lw15585.34eb91daf.tgz",
+    "@input-output-hk/lace-sdk": "file:../lace-platform/.claude/worktrees/pr-2805/apps/lace-sdk",
     "buffer": "^6.0.3",
     "typescript": "^5.9.3",
     "vite": "^8.0.0"
