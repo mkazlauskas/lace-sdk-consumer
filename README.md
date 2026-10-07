@@ -2,6 +2,8 @@
 
 Testnet-only Cardano Preprod demo using `@input-output-hk/lace-sdk/cardano`. It creates and opens a wallet with a WebAuthn PRF passkey. No recovery phrase is shown or exported. Web3Auth funds are not migrated. This rebased SDK tarball is unpublished; final evidence needs a published prerelease and a fresh run on real passkey providers.
 
+> The current consumer uses the hosted Lace signer and adds a Cardano custody account proof of concept. See [HOSTED-SIGNER.md](HOSTED-SIGNER.md) for both flows, the SDK tarball identity and the verification evidence. The sections below describe the earlier local-passkey flow.
+
 ## Start
 
 SDK tarball: `/tmp/opencode/input-output-hk-lace-sdk-0.1.0-lw15585.34eb91daf.tgz`, source commit `34eb91dafaf59ea0b28263ec9f44ae95bebf8ef9`, SHA-256 `77e6c3c7c488f02ddf5038d4290fedf435c054578633718070b2780313cc3bd7`.
