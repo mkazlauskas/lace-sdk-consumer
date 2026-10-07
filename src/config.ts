@@ -8,9 +8,11 @@ import {
 
 // --- Config (mirrors apps/lace-extension/src/util/config.ts) ---
 
-const BLOCKFROST_PROJECT_ID_PREPROD = import.meta.env
+export const BLOCKFROST_PROJECT_ID_PREPROD = import.meta.env
   .VITE_BLOCKFROST_PROJECT_ID_PREPROD;
-const BLOCKFROST_URL_PREPROD = import.meta.env.VITE_BLOCKFROST_URL_PREPROD;
+export const BLOCKFROST_URL_PREPROD =
+  import.meta.env.VITE_BLOCKFROST_URL_PREPROD || "https://cardano-preprod.blockfrost.io";
+const TIP_POLL_MS = Number(import.meta.env.VITE_TIP_POLL_MS) || 30000;
 
 const rateLimiterConfig = {
   size: 500,
@@ -28,12 +30,12 @@ export const config: Partial<AppConfig> = {
   extraFeatureFlags: [],
   defaultTestnetChainId: Cardano.ChainIds.Preprod,
   cardanoProvider: {
-    tipPollFrequency: Milliseconds(30000),
+    tipPollFrequency: Milliseconds(TIP_POLL_MS),
     blockfrostConfigs: {
       // keyed by 'network magic'
       1: {
         clientConfig: {
-          baseUrl: BLOCKFROST_URL_PREPROD || "https://cardano-preprod.blockfrost.io",
+          baseUrl: BLOCKFROST_URL_PREPROD,
           apiVersion: "v0",
           projectId: BLOCKFROST_PROJECT_ID_PREPROD,
         },

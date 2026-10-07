@@ -1,6 +1,7 @@
 const out = document.getElementById("out")!;
 const stateOutput = document.getElementById("state-output")!;
 const addressEl = document.getElementById("address-output")!;
+const balanceEl = document.getElementById("balance-output")!;
 const tokensEl = document.getElementById("tokens-output")!;
 const createBtn = document.getElementById("create-passkey") as HTMLButtonElement;
 const openBtn = document.getElementById("open-passkey") as HTMLButtonElement;
@@ -10,6 +11,10 @@ const submitTxBtn = document.getElementById("submit-tx") as HTMLButtonElement;
 const txOutputEl = document.getElementById("tx-output")!;
 const reviewEl = document.getElementById("tx-review")!;
 const reviewCheck = document.getElementById("review-confirm") as HTMLInputElement;
+const recipientInput = document.getElementById("recipient") as HTMLInputElement;
+const amountInput = document.getElementById("amount") as HTMLInputElement;
+const custodyRecipientBtn = document.getElementById("use-custody-recipient") as HTMLButtonElement;
+let custodyAddress: string | undefined;
 
 export const ui = {
   setStatus(text: string) {
@@ -32,6 +37,12 @@ export const ui = {
     addressEl.textContent = address
       ? `Address: ${address}`
       : "No addresses yet";
+  },
+
+  updateBalance(balance: { lovelace: bigint; utxoCount: number } | null) {
+    balanceEl.textContent = balance
+      ? `Spendable: ${balance.lovelace / 1_000_000n}.${(balance.lovelace % 1_000_000n).toString().padStart(6, "0")} ADA in ${balance.utxoCount} UTxO(s)`
+      : "";
   },
 
   updateTokens(accountTokens: { count: number; json: string } | null) {
@@ -92,9 +103,26 @@ export const ui = {
     signTxBtn.disabled = !reviewCheck.checked;
   },
 
-  showTxReview(details: { recipient: string; amount: string; changeAddress: string; inputCount: number; fee: string }) {
+  setRecipient(address: string) {
+    recipientInput.value = address;
+  },
+
+  recipient() {
+    return recipientInput.value.trim();
+  },
+
+  amount() {
+    return amountInput.value;
+  },
+
+  enableCustodyRecipient(address: string) {
+    custodyAddress = address;
+    custodyRecipientBtn.disabled = false;
+  },
+
+  showTxReview(details: { recipient: string; amount: string; changeAddress: string; inputCount: number; fee: string; note?: string }) {
     reviewEl.hidden = false;
-    reviewEl.textContent = `Review Preprod transaction before passkey signing:\nRecipient: ${details.recipient}\nAmount: ${details.amount}\nChange: ${details.changeAddress}\nSelected inputs: ${details.inputCount}\nFee: ${details.fee}\nCheck the transaction CBOR below before approval.`;
+    reviewEl.textContent = `Review Preprod transaction before passkey signing:\nRecipient: ${details.recipient}\nAmount: ${details.amount}\nChange: ${details.changeAddress}\nSelected inputs: ${details.inputCount}\nFee: ${details.fee}\n${details.note ? `${details.note}\n` : ""}Check the transaction CBOR below before approval.`;
     reviewCheck.checked = false;
     signTxBtn.disabled = true;
     submitTxBtn.disabled = true;
@@ -148,6 +176,10 @@ export const ui = {
     txOutputEl.textContent = `Transaction CBOR:\n${cbor}`;
   },
 };
+
+custodyRecipientBtn.addEventListener("click", () => {
+  if (custodyAddress) recipientInput.value = custodyAddress;
+});
 
 reviewCheck.addEventListener("change", () => {
   signTxBtn.disabled = !reviewCheck.checked;

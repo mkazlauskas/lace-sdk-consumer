@@ -7,16 +7,25 @@
       html, body { margin: 0; height: 100%; overflow: hidden; }
       body { display: flex; flex-direction: column; }
       pre { white-space: pre-wrap; word-break: break-all; margin: 0; }
+      section { border-top: 1px solid #999; margin-top: 12px; padding-top: 8px; }
+      textarea { width: 100%; font-family: monospace; }
+      input[type="text"] { width: 100%; max-width: 60em; font-family: monospace; }
     </style>
   </head>
   <body>
     <div id="main" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:8px;">
       <pre id="out"></pre>
       <pre id="address-output"></pre>
+      <pre id="balance-output"></pre>
       <p>Cardano Preprod only. Passkeys and signing stay on the hosted Lace signer. This demo uses a local PR SDK build.</p>
       <p>Create or open connects to the signer popup. On first use, choose an existing passkey or create a new wallet there, then approve sharing your Cardano account. An existing signer credential is reused. Each signature requires another approval and passkey prompt.</p>
       <button id="create-passkey" hidden>Create passkey wallet</button>
       <button id="open-passkey" hidden>Open passkey wallet</button>
+      <p>
+        <label>Recipient <input id="recipient" type="text" /></label>
+        <button id="use-custody-recipient" disabled>Deposit to custody account</button>
+        <label>Amount (ADA) <input id="amount" value="1.23" size="8" /></label>
+      </p>
       <button id="build-tx" disabled>Build Transaction</button>
       <pre id="tx-review" hidden></pre>
       <label><input id="review-confirm" type="checkbox" /> I reviewed the Preprod transaction and recipient</label>
@@ -24,6 +33,30 @@
       <button id="submit-tx" disabled>Submit Transaction</button>
       <pre id="tx-output"></pre>
       <pre id="tokens-output"></pre>
+
+      <section id="custody">
+        <h2>Cardano custody account (proof of concept)</h2>
+        <p>The custody contract is unaudited; use Preprod test ADA only. Device keys come from the hosted signer passkey (CIP-1854). The fee sponsor below is a development stand-in with an in-memory key: fund its address with one 5 ADA collateral UTxO and one fee UTxO of at least 10 ADA.</p>
+        <pre id="sponsor-output"></pre>
+        <button id="custody-device-key">Share custody device key</button>
+        <button id="custody-create" disabled>Create custody account</button>
+        <button id="custody-open" hidden>Open saved custody account</button>
+        <button id="custody-issue-grant" disabled>Grant agent spending</button>
+        <button id="custody-revoke-grant" disabled>Revoke agent grant</button>
+        <pre id="custody-device"></pre>
+        <pre id="custody-state"></pre>
+        <h3>Agent policy</h3>
+        <p>Exported from the confirmed account state. An agent needs only this policy and its own key.</p>
+        <textarea id="agent-policy" rows="12" spellcheck="false"></textarea>
+        <h3>Agent (observer wallet, development Ed25519 key)</h3>
+        <pre id="agent-key"></pre>
+        <button id="agent-open" disabled>Open account as agent</button>
+        <label>Spend (ADA) <input id="agent-amount" value="2" size="8" /></label>
+        <button id="agent-spend" disabled>Agent: build, sign and submit spend</button>
+        <pre id="agent-state"></pre>
+        <h3>Custody log</h3>
+        <pre id="custody-log"></pre>
+      </section>
     </div>
     <div id="state-output" style="flex:1;overflow:auto;background:#111;color:#0f0;font-family:monospace;font-size:12px;padding:8px;white-space:pre-wrap;display:none;"></div>
     <script type="module" src="/src/bootstrap.ts"></script>
