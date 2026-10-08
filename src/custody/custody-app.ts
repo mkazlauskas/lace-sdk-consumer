@@ -226,11 +226,15 @@ export function startCustody({
     exclusive(async () => {
       const device = deviceKey;
       if (!device) throw new Error("Share the custody device key first");
-      // A key read back from storage is re-derived before it binds an account.
-      const derived = await deriveCardanoCustodyDevice(device.extendedAccountPublicKey, 0);
-      if (derived.keyHash !== device.device.keyHash) throw new Error("The saved custody device key is inconsistent");
+      // `withSigner` comes first so that the popup opens while the click
+      // still carries user activation.
       const creation = unwrap<CardanoCustodyAccountCreation>(
-        await withSigner(() => createCardanoCustodyAccount(wallet, { device, deviceSigner, sponsor, name: "Custody Preprod" })),
+        await withSigner(async () => {
+          // A key read back from storage is re-derived before it binds an account.
+          const derived = await deriveCardanoCustodyDevice(device.extendedAccountPublicKey, 0);
+          if (derived.keyHash !== device.device.keyHash) throw new Error("The saved custody device key is inconsistent");
+          return createCardanoCustodyAccount(wallet, { device, deviceSigner, sponsor, name: "Custody Preprod" });
+        }),
       );
       track({ record: creation.record, device: creation.device }, creation.accountId);
       if (creation.status === "exists") {
