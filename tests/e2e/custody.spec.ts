@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
+import { CUSTODY_ACCOUNT_SCRIPT_HASH } from "../../src/custody/custody-contract";
 import { FakeLedger } from "./fake-ledger";
-import { forbidConsumerWebAuthn, popup, prepareSigner, signerOrigin, type Credential } from "./signer";
+import { forbidConsumerWebAuthn, popup, prepareSigner, recordSignerRequests, type Credential } from "./signer";
 
 // The Cardano custody account flow through the published SDK, the real
 // hosted signer build and a fake Preprod ledger: device key, sponsored
@@ -10,23 +11,26 @@ import { forbidConsumerWebAuthn, popup, prepareSigner, signerOrigin, type Creden
 // the revoked grant.
 
 const RECIPIENT = "addr_test1qzkwnu5y0djlptw3t38v6njkzaaq6mdnn7r97zkxhu2ypy6e8l75l0avdum8zp0cycd9785nhjtmntmj22l934ptjehqm3kj5s";
-const STATE_NFT_POLICY = "0524f57b785cf3a45b7ed6029b387dc39ffb2411bd1cb4300c58c2c3";
 const SETTLE = { timeout: 120_000 };
 
 let ledger: FakeLedger;
+let signerRequests: ReturnType<typeof recordSignerRequests>;
 
 test.beforeEach(async ({ context, page }) => {
   await prepareSigner(context);
+  signerRequests = recordSignerRequests(context);
   await forbidConsumerWebAuthn(page);
   ledger = new FakeLedger();
   await ledger.install(context);
 });
 
 test.afterEach(() => {
-  // The signer page must never read the chain: it signs from the request's
-  // context, and the app owns every Blockfrost read.
-  expect(ledger.requests.filter((request) => request.frameOrigin === signerOrigin || request.headerOrigin === signerOrigin)).toEqual([]);
-  // The observation itself works: the app's own reads are seen.
+  // The signer page must never call another origin: it signs from the
+  // request's context, and the app owns every chain read. The signer's own
+  // requests were seen, so the observation works.
+  expect(signerRequests.toOtherOrigins).toEqual([]);
+  expect(signerRequests.count).toBeGreaterThan(0);
+  // The ledger sees the app's own Blockfrost reads.
   expect(ledger.requests.some((request) => request.frameOrigin?.startsWith("http://localhost:"))).toBe(true);
   if (ledger.unknownPaths.size > 0) console.log(`Blockfrost paths the fake ledger does not serve: ${[...ledger.unknownPaths].join(", ")}`);
 });
@@ -34,11 +38,29 @@ test.afterEach(() => {
 const log = (page: Page) => page.locator("#custody-log");
 const custodyState = (page: Page) => page.locator("#custody-state");
 
-async function approve(page: Page, button: string, credentials: Credential[], title: string, details: (string | RegExp)[] = []) {
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The time the signer shows for POSIX milliseconds. */
+const signerUtc = (posixMs: string) => `${new Date(Number(posixMs)).toISOString().slice(0, 19).replace("T", " ")} UTC`;
+
+type Consent = {
+  /** Text shown anywhere in the popup. */
+  details?: (string | RegExp)[];
+  /** A label and the value shown next to it. */
+  rows?: [label: string, value: string | RegExp][];
+};
+
+/** Checks a signer consent and approves it with the passkey. Returns the consent's text. */
+async function approve(page: Page, button: string, credentials: Credential[], title: string, { details = [], rows = [] }: Consent = {}) {
   const { signer } = await popup(page, button, credentials);
   await expect(signer.getByText(title, { exact: true })).toBeVisible({ timeout: 60_000 });
   for (const detail of details) await expect(signer.getByText(detail).first()).toBeVisible();
+  const text = await signer.locator("body").innerText();
+  for (const [label, value] of rows) {
+    expect(text).toMatch(new RegExp(`${escape(label)}\\s+${typeof value === "string" ? escape(value) : value.source}`));
+  }
   await signer.getByRole("button", { name: "Approve with passkey", exact: true }).click();
+  return text;
 }
 
 test("custody account: sponsored creation, agent grant, grant spend, overspend refusal and revocation", async ({ page }) => {
@@ -62,12 +84,20 @@ test("custody account: sponsored creation, agent grant, grant spend, overspend r
   ledger.fund(sponsorAddress, 100_000_000n);
 
   // 1. Device key from the hosted signer.
-  await approve(page, "Share custody device key", credentials, "Share your Cardano custody device key", ["m/1854'/1815'/1'", "Preprod"]);
+  await approve(page, "Share custody device key", credentials, "Share your Cardano custody device key", { rows: [["Network", "Preprod"], ["Key", "m/1854'/1815'/1'"]] });
   await expect(log(page)).toContainText("Custody device key shared: fingerprint");
   const deviceFingerprint = /fingerprint ([0-9a-f]{8}…[0-9a-f]{8})/.exec(await page.locator("#custody-device").innerText())![1];
 
   // 2. Sponsored creation (fee mode).
-  await approve(page, "Create custody account", credentials, "Create Cardano custody account", ["Permanent deposit", deviceFingerprint]);
+  await approve(page, "Create custody account", credentials, "Create Cardano custody account", {
+    details: ["Permanent deposit"],
+    rows: [
+      ["Stake deposit", "2000000 lovelace"],
+      ["Device (1)", `${deviceFingerprint} (this device)`],
+      ["Fee paid by", sponsorAddress],
+      ["Collateral from", sponsorAddress],
+    ],
+  });
   await expect(log(page)).toContainText("Custody account creation submitted:", SETTLE);
   await expect(log(page)).toContainText("Custody account live:", SETTLE);
   await expect(custodyState(page)).toContainText("Status: live");
@@ -93,9 +123,11 @@ test("custody account: sponsored creation, agent grant, grant spend, overspend r
   await page.locator("#amount").fill("10");
   await page.getByRole("button", { name: "Build Transaction", exact: true }).click();
   await expect(page.locator("#tx-review")).toContainText("a deposit");
+  // The review reads the amount from the built transaction.
+  await expect(page.locator("#tx-review")).toContainText("Amount: 10.000000 ADA");
   await expect(page.locator("#tx-review")).toContainText("Selected inputs: 1");
   await page.getByRole("checkbox").check();
-  await approve(page, "Sign Transaction", credentials, "Sign a transaction", [/is a Cardano custody account/]);
+  await approve(page, "Sign Transaction", credentials, "Sign a transaction", { details: [/is a Cardano custody account/] });
   await expect(page.locator("#out")).toContainText("Signed! (1 signature(s))");
   await page.getByRole("button", { name: "Submit Transaction", exact: true }).click();
   await expect(page.locator("#out")).toContainText("Submitted! txId=");
@@ -103,7 +135,17 @@ test("custody account: sponsored creation, agent grant, grant spend, overspend r
 
   // 4. Grant the development agent key 4 ADA per spend, 6 ADA in total, to one recipient.
   const agentKeyHash = /Agent key hash ([0-9a-f]{56})/.exec(await page.locator("#agent-key").innerText())![1];
-  await approve(page, "Grant agent spending", credentials, "Grant spending to an agent", ["4000000 lovelace", "6000000 lovelace", RECIPIENT]);
+  const grantConsent = await approve(page, "Grant agent spending", credentials, "Grant spending to an agent", {
+    rows: [
+      ["Issued grant", "Grant ID 0"],
+      ["Grantee", agentKeyHash],
+      ["Per spend", "4000000 lovelace"],
+      ["Remaining", "6000000 lovelace"],
+      ["Expires", /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/],
+      ["Recipient (1)", RECIPIENT],
+      ["Fee paid by", "The custody account"],
+    ],
+  });
   await expect(log(page)).toContainText("Grant settled: slot 0", SETTLE);
   await expect(log(page)).toContainText("Agent policy exported for slot 0");
   const policy = JSON.parse(await page.locator("#agent-policy").inputValue());
@@ -114,6 +156,8 @@ test("custody account: sponsored creation, agent grant, grant spend, overspend r
     grant: { slot: "0", grantee: agentKeyHash, asset: { policyId: "", assetName: "" }, perCallCap: "4000000", cap: "6000000", lovelacePerCallCap: "0", lovelaceCap: "0", recipients: [RECIPIENT] },
   });
   await expect(custodyState(page)).toContainText("slot 0 [effective]");
+  // The popup showed the expiry the grant carries.
+  expect(grantConsent).toMatch(new RegExp(`Expires\\s+${escape(signerUtc(policy.grant.expiresAt))}`));
 
   // 5. The agent opens the account from the policy alone and spends 2 ADA.
   await page.getByRole("button", { name: "Open account as agent", exact: true }).click();
@@ -121,23 +165,25 @@ test("custody account: sponsored creation, agent grant, grant spend, overspend r
   await expect(page.locator("#agent-state")).toContainText("Status: live", SETTLE);
   await expect(page.locator("#agent-state")).not.toContainText("This device listed");
   const recipientBefore = ledger.lovelaceAt(RECIPIENT);
+  const accountBefore = ledger.lovelaceAt(custodyAddress);
   await page.locator("#agent-amount").fill("2");
   await page.getByRole("button", { name: "Agent: build, sign and submit spend", exact: true }).click();
   await expect(log(page)).toContainText("Agent spend built:", SETTLE);
   await expect(log(page)).toContainText("Agent spend submitted:", SETTLE);
   await expect(log(page)).toContainText("Agent spend settled", SETTLE);
+  const spendTxId = /Agent spend submitted: ([0-9a-f]{64})/.exec(await log(page).innerText())![1];
+  const spendFee = ledger.transaction(spendTxId)!.fee;
   expect(ledger.lovelaceAt(RECIPIENT) - recipientBefore).toBe(2_000_000n);
-  // The fee came from the account and counts against the remaining cap.
+  // The fee came from the account, and the control datum's cap fell by exactly
+  // what left the account in the applied transaction: payment plus fee.
+  const outflow = accountBefore - ledger.lovelaceAt(custodyAddress);
+  expect(outflow).toBe(2_000_000n + spendFee);
   const remainingCap = async () => {
     const match = /slot 0 \[effective\][^\n]*?, (\d+) remaining/.exec(await custodyState(page).innerText());
-    return match ? Number(match[1]) : undefined;
+    return match ? BigInt(match[1]) : undefined;
   };
-  await expect.poll(remainingCap, SETTLE).toBeLessThan(4_000_000);
-  const remaining = BigInt((await remainingCap())!);
-  const fee = 6_000_000n - 2_000_000n - remaining;
-  expect(fee).toBeGreaterThan(150_000n);
-  expect(fee).toBeLessThan(2_000_000n);
-  console.log(`Evidence: grant spend of 2000000 lovelace paid fee ${fee}; remaining cap ${remaining}`);
+  await expect.poll(remainingCap, SETTLE).toBe(6_000_000n - outflow);
+  console.log(`Evidence: grant spend ${spendTxId} of 2000000 lovelace paid fee ${spendFee}; account outflow ${outflow}; remaining cap ${6_000_000n - outflow}`);
 
   // 6. An overspend is refused before any signature or submission.
   const submissionsBefore = ledger.submissions.length;
@@ -149,7 +195,7 @@ test("custody account: sponsored creation, agent grant, grant spend, overspend r
   expect(ledger.submissions.length).toBe(submissionsBefore);
 
   // 7. The owner revokes the grant; a spend under it is refused.
-  await approve(page, "Revoke agent grant", credentials, "Revoke an agent grant");
+  await approve(page, "Revoke agent grant", credentials, "Revoke an agent grant", { rows: [["Revoked grant", "Grant ID 0"], ["Grants", "None"]] });
   await expect(log(page)).toContainText("Grant revoked: slot 0", SETTLE);
   await expect(custodyState(page)).toContainText("Grants (0)");
   await expect(page.locator("#agent-state")).toContainText("Grants (0)", SETTLE);
@@ -161,7 +207,7 @@ test("custody account: sponsored creation, agent grant, grant spend, overspend r
   // Every submission the ledger saw applied: creation, deposit, grant, spend, revoke.
   expect(ledger.submissions.map(({ accepted, message }) => (accepted ? "applied" : message))).toEqual(["applied", "applied", "applied", "applied", "applied"]);
   // The state NFT is never treated as a token: no metadata lookup for it.
-  expect(ledger.requests.filter((request) => request.path.startsWith(`assets/${STATE_NFT_POLICY}`))).toEqual([]);
+  expect(ledger.requests.filter((request) => request.path.startsWith(`assets/${CUSTODY_ACCOUNT_SCRIPT_HASH}`))).toEqual([]);
   // The ordinary account kept its own UTxOs; the custody account kept its funds apart.
   expect(ledger.lovelaceAt(ordinaryAddress)).toBeLessThan(40_000_000n);
 });

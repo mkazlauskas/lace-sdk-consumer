@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { FakeLedger } from "./fake-ledger";
-import { forbidConsumerWebAuthn, popup, prepareSigner, signerOrigin } from "./signer";
+import { forbidConsumerWebAuthn, popup, prepareSigner, recordSignerRequests, signerOrigin } from "./signer";
 
 const bindingKey = `lace-remote-passkey-wallet-v1:${signerOrigin}:0`;
 
@@ -21,18 +21,23 @@ async function create(page: Page) {
 }
 
 let ledger: FakeLedger;
+let signerRequests: ReturnType<typeof recordSignerRequests>;
 
 test.beforeEach(async ({ context, page }) => {
   await prepareSigner(context);
+  signerRequests = recordSignerRequests(context);
   await forbidConsumerWebAuthn(page);
   ledger = new FakeLedger();
   await ledger.install(context);
 });
 
 test.afterEach(() => {
-  // The signer page must never read the chain: every fact it shows comes from the request.
-  expect(ledger.requests.filter((request) => request.frameOrigin === signerOrigin || request.headerOrigin === signerOrigin)).toEqual([]);
-  // The observation itself works: the app's own reads are seen.
+  // The signer page must never call another origin: it signs from the
+  // request's context, and the app owns every chain read. The signer's own
+  // requests were seen, so the observation works.
+  expect(signerRequests.toOtherOrigins).toEqual([]);
+  expect(signerRequests.count).toBeGreaterThan(0);
+  // The ledger sees the app's own Blockfrost reads.
   expect(ledger.requests.some((request) => request.frameOrigin?.startsWith("http://localhost:"))).toBe(true);
   if (ledger.unknownPaths.size > 0) console.log(`Blockfrost paths the fake ledger does not serve: ${[...ledger.unknownPaths].join(", ")}`);
 });
