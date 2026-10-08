@@ -11,7 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@input-output-hk/lace-sdk": "file:../../../../../tmp/claude-1000/-home-mkazlauskas-Code-iog-lace-platform/a26089d5-8da3-4965-8dee-fb863b8138ff/scratchpad/consumer-live/input-output-hk-lace-sdk-0.1.0-8dab56ecf.tgz",
+    "@input-output-hk/lace-sdk": "file:vendor/input-output-hk-lace-sdk-0.1.0-8dab56ecf.tgz",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "buffer": "^6.0.3",
