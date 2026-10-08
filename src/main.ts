@@ -16,6 +16,7 @@ import { bindingKey, readBinding } from "./binding";
 import { signer, signerUrl, withSigner } from "./signer";
 import { parseAdaAmount, selectAccountAddress, selectAccountUtxos } from "./accounts";
 import { startCustody } from "./custody/custody-app";
+import { formatAda } from "./custody/custody-view";
 
 let savedBinding: ReturnType<typeof readBinding>;
 try {
@@ -129,9 +130,14 @@ ui.onBuildTxClick(async () => {
   lastSignedTxCbor = undefined;
   ui.updateTxOutput(builtTx.toCbor());
   const body = builtTx.body().toCore();
+  // The review shows what the built transaction pays the recipient, not the
+  // amount field, which the user may have edited while the build ran.
+  const paid = body.outputs
+    .filter((output: { address: string }) => output.address === recipient)
+    .reduce((total: bigint, output: { value: { coins: bigint } }) => total + BigInt(output.value.coins), 0n);
   ui.showTxReview({
     recipient,
-    amount: `${ui.amount()} ADA`,
+    amount: formatAda(paid),
     changeAddress: latestAddress,
     inputCount: body.inputs.length,
     fee: `${Number(body.fee) / 1_000_000} ADA`,
