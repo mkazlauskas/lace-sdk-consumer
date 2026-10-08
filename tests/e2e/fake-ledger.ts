@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import type { BrowserContext, Request, Route } from "@playwright/test";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { CUSTODY_ACCOUNT_SCRIPT_HASH } from "../../src/custody/custody-contract";
 import { keyHashOf, verifyHashSignature } from "../../src/custody/dev-key";
 import {
   PREPROD_EPOCH_LENGTH,
@@ -17,10 +18,11 @@ import {
 
 // A small Cardano Preprod ledger behind the Blockfrost API, for browser tests.
 // It holds UTxOs with inline datums, applies submitted transactions after
-// checking their inputs, value balance, validity interval and vkey
-// signatures, tracks stake registration and rewards, and answers script
-// evaluation with fixed per-redeemer budgets. It does not run Plutus
-// scripts: validator rules are not checked here.
+// checking their inputs, validity interval, size, minimum fee, minimum
+// output values, collateral, execution unit limits, vkey signatures and value
+// balance under Preprod's protocol parameters, tracks stake registration and
+// rewards, and answers script evaluation with fixed per-redeemer budgets. It
+// does not run Plutus scripts: validator rules are not checked here.
 
 // The published SDK's ESM build imports `lodash/*` subpaths without a file
 // extension, which Node's ESM resolver refuses; its CommonJS build loads.
@@ -32,7 +34,6 @@ const sdk = createRequire(import.meta.url)("@input-output-hk/lace-sdk/cardano") 
 const { Cardano, Serialization } = sdk;
 
 export const BLOCKFROST_ORIGIN = "https://cardano-preprod.blockfrost.io";
-const CUSTODY_POLICY_ID = "0524f57b785cf3a45b7ed6029b387dc39ffb2411bd1cb4300c58c2c3";
 /** Where test funds come from: a key nobody holds. */
 const FAUCET_ADDRESS: string = Cardano.EnterpriseAddress.fromCredentials(Cardano.NetworkId.Testnet, { type: Cardano.CredentialType.KeyHash, hash: "fa".repeat(28) })
   .toAddress()
@@ -40,6 +41,25 @@ const FAUCET_ADDRESS: string = Cardano.EnterpriseAddress.fromCredentials(Cardano
 const KEY_DEPOSIT = 2_000_000n;
 
 const parameters = JSON.parse(readFileSync(new URL("./fixtures/preprod-parameters.json", import.meta.url), "utf8")) as Record<string, unknown>;
+const parameter = (name: string): bigint => BigInt(parameters[name] as number | string);
+
+/** A protocol parameter price as a fraction over 10^12. */
+const PRICE_DENOMINATOR = 10n ** 12n;
+const price = (name: string): bigint => BigInt(Number(parameters[name]).toFixed(12).replace(".", ""));
+
+/**
+ * The Conway fee for reference scripts: a base price per byte that grows by
+ * a factor of 1.2 for every further 25600 bytes.
+ */
+const referenceScriptFee = (bytes: number): bigint => {
+  let fee = 0;
+  let perByte = Number(parameters.min_fee_ref_script_cost_per_byte);
+  for (let remaining = bytes; remaining > 0; remaining -= 25_600) {
+    fee += Math.min(remaining, 25_600) * perByte;
+    perByte *= 1.2;
+  }
+  return BigInt(Math.floor(fee));
+};
 
 type Amount = { unit: string; quantity: string };
 type Output = {
@@ -48,6 +68,8 @@ type Output = {
   dataHash: string | null;
   inlineDatum: string | null;
   referenceScriptHash: string | null;
+  /** Serialized size of the reference script, which the minimum fee charges for. */
+  referenceScriptSize?: number;
 };
 type Utxo = Output & { txHash: string; index: number };
 type Block = { height: number; hash: string; slot: number; time: number; txHashes: string[] };
@@ -110,9 +132,11 @@ export class FakeLedger {
   readonly #addressTxs = new Map<string, string[]>();
   readonly #stake = new Map<string, StakeAccount>();
   #faucetNonce = 0;
-
   /** POSIX milliseconds of the ledger's clock; the tip follows it. */
-  constructor(readonly now: () => number = Date.now) {
+  readonly now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.now = now;
     this.#addBlock([]);
   }
 
@@ -208,7 +232,13 @@ export class FakeLedger {
       dataHash,
       inlineDatum,
       referenceScriptHash: scriptRef ? scriptRef.hash() : null,
+      ...(scriptRef ? { referenceScriptSize: scriptRef.toCbor().length / 2 } : {}),
     };
+  }
+
+  /** The smallest lovelace an output of this serialized size may hold. */
+  #minimumLovelace(serialized: { toCbor(): string }): bigint {
+    return parameter("coins_per_utxo_size") * (BigInt(serialized.toCbor().length / 2) + 160n);
   }
 
   #paymentKeyHash(address: string): string | undefined {
@@ -242,7 +272,47 @@ export class FakeLedger {
     const inputs = body.inputs.map((input: { txId: string; index: number }) => this.#resolve(input, "Input"));
     const collaterals = (body.collaterals ?? []).map((input: { txId: string; index: number }) => this.#resolve(input, "Collateral"));
     const references = (body.referenceInputs ?? []).map((input: { txId: string; index: number }) => this.#resolve(input, "Reference input"));
-    if ((core.witness.redeemers ?? []).length > 0 && collaterals.length === 0) throw new LedgerError("NoCollateralInputs");
+    const redeemers: { executionUnits: { memory: number; steps: number } }[] = core.witness.redeemers ?? [];
+
+    // Size, execution units and the minimum fee. The ledger sizes a
+    // transaction without its is_valid flag (`toCBORForSizeComputation`): one
+    // byte less than the CBOR submitted.
+    const size = cborHex.length / 2 - 1;
+    if (BigInt(size) > parameter("max_tx_size")) throw new LedgerError(`MaxTxSizeUTxO: ${size} bytes, at most ${parameter("max_tx_size")}`);
+    const memory = redeemers.reduce((total, { executionUnits }) => total + BigInt(executionUnits.memory), 0n);
+    const steps = redeemers.reduce((total, { executionUnits }) => total + BigInt(executionUnits.steps), 0n);
+    if (memory > parameter("max_tx_ex_mem") || steps > parameter("max_tx_ex_steps")) {
+      throw new LedgerError(`ExUnitsTooBigUTxO: ${memory} memory and ${steps} steps, at most ${parameter("max_tx_ex_mem")} and ${parameter("max_tx_ex_steps")}`);
+    }
+    const scriptFee = (memory * price("price_mem") + steps * price("price_step") + PRICE_DENOMINATOR - 1n) / PRICE_DENOMINATOR;
+    const referenceScriptBytes = [...inputs, ...references].reduce((total: number, utxo: Utxo) => total + (utxo.referenceScriptSize ?? 0), 0);
+    const minimumFee = parameter("min_fee_a") * BigInt(size) + parameter("min_fee_b") + scriptFee + referenceScriptFee(referenceScriptBytes);
+    if (body.fee < minimumFee) throw new LedgerError(`FeeTooSmallUTxO: fee ${body.fee}, at least ${minimumFee}`);
+
+    // Every output, the collateral return included, holds its minimum lovelace.
+    const serializedBody = tx.body();
+    const serializedOutputs = [...serializedBody.outputs(), ...(serializedBody.collateralReturn() ? [serializedBody.collateralReturn()] : [])];
+    for (const serialized of serializedOutputs) {
+      const { address, value } = serialized.toCore();
+      const minimum = this.#minimumLovelace(serialized);
+      if (value.coins < minimum) throw new LedgerError(`BabbageOutputTooSmallUTxO: ${value.coins} lovelace to ${address}, at least ${minimum}`);
+    }
+
+    // Collateral, when scripts run.
+    if (redeemers.length > 0) {
+      if (collaterals.length === 0) throw new LedgerError("NoCollateralInputs");
+      if (BigInt(collaterals.length) > parameter("max_collateral_inputs")) throw new LedgerError(`TooManyCollateralInputs: ${collaterals.length}`);
+      const scriptLocked = collaterals.find((utxo: Utxo) => !this.#paymentKeyHash(utxo.address));
+      if (scriptLocked) throw new LedgerError(`ScriptsNotPaidUTxO: collateral ${scriptLocked.txHash}#${scriptLocked.index} is not locked by a key`);
+      const collateralLovelace: bigint = collaterals.reduce((total: bigint, utxo: Utxo) => total + (assetsOfAmount(utxo.amount).get("lovelace") ?? 0n), 0n);
+      const balance: bigint = collateralLovelace - BigInt(body.collateralReturn?.value.coins ?? 0n);
+      if (body.totalCollateral !== undefined && body.totalCollateral !== balance) {
+        throw new LedgerError(`IncorrectTotalCollateralField: collateral balance ${balance}, total collateral ${body.totalCollateral}`);
+      }
+      if (balance * 100n < body.fee * parameter("collateral_percent")) {
+        throw new LedgerError(`InsufficientCollateral: ${balance}, at least ${parameter("collateral_percent")}% of the fee ${body.fee}`);
+      }
+    }
 
     // Every vkey witness must verify over the body hash.
     const signers = new Set<string>();
@@ -353,7 +423,7 @@ export class FakeLedger {
         const input = sortedInputs[index];
         if (!input) throw new LedgerError(`No input at redeemer index ${index}`);
         const utxo = this.#resolve(input, "Input");
-        const isControl = utxo.amount.some(({ unit }) => unit.startsWith(CUSTODY_POLICY_ID));
+        const isControl = utxo.amount.some(({ unit }) => unit.startsWith(CUSTODY_ACCOUNT_SCRIPT_HASH));
         budget = isControl ? { memory: 1_400_000, steps: 520_000_000 } : { memory: 240_000, steps: 90_000_000 };
       } else if (purpose === Cardano.RedeemerPurpose.mint) {
         budget = { memory: 620_000, steps: 210_000_000 };
