@@ -4,7 +4,6 @@ import { randomBytes } from "node:crypto";
 import type { BrowserContext, Request, Route } from "@playwright/test";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { CUSTODY_ACCOUNT_SCRIPT_HASH } from "../../src/custody/custody-contract";
 import { keyHashOf, verifyHashSignature } from "../../src/custody/dev-key";
 import {
   PREPROD_EPOCH_LENGTH,
@@ -14,34 +13,57 @@ import {
   preprodEpochOf,
   preprodSlotAt,
   preprodSlotStart,
-} from "../../src/custody/preprod-time";
+} from "./preprod-time";
 
 // A small Cardano Preprod ledger behind the Blockfrost API, for browser tests.
-// It holds UTxOs with inline datums, applies submitted transactions after
-// checking their inputs, validity interval, size, minimum fee, minimum
-// output values, collateral, execution unit limits, vkey signatures and value
-// balance under Preprod's protocol parameters, tracks stake registration and
-// rewards, and answers script evaluation with fixed per-redeemer budgets. It
-// does not run Plutus scripts: validator rules are not checked here.
+// It holds UTxOs with inline datums and reference scripts, among them the
+// UTxOs that park the custody account proxy and logic version 1 on Preprod,
+// and the logic's registered reward account. It applies submitted
+// transactions after checking their inputs, validity interval, size, minimum
+// fee (reference scripts included), minimum output values, collateral,
+// execution unit limits, vkey signatures, script witnesses and redeemers,
+// the script integrity hash, and value balance under Preprod's protocol
+// parameters. A test may hold applied transactions back, as a mempool
+// would, until it releases them. It tracks stake
+// registration and rewards, and answers script evaluation with fixed
+// budgets per script. It runs no Plutus script. Of the custody contract it
+// checks only what the account proxy itself requires: that the transaction
+// runs the logic its control datum names, through a withdrawal from the
+// logic's reward account. Grant, device and state rules are not checked.
 
-// The published SDK's ESM build imports `lodash/*` subpaths without a file
-// extension, which Node's ESM resolver refuses; its CommonJS build loads.
-// Its bundled libsodium looks for `window` or `self` before Node's crypto.
+// The unit tests load the SDK's CommonJS build too (tests/support), so both
+// share one SDK instance. Its bundled libsodium looks for `window` or `self`
+// before Node's crypto.
 (globalThis as { self?: unknown }).self ??= globalThis;
 const sdk = createRequire(import.meta.url)("@input-output-hk/lace-sdk/cardano") as typeof import("@input-output-hk/lace-sdk/cardano");
-// `Cardano` and `Serialization` are typed from `@cardano-sdk/core`, which the
-// published package does not install, so they are `any` to a consumer.
-const { Cardano, Serialization } = sdk;
+const { Cardano, HexBlob, Serialization, CARDANO_CUSTODY_ACCOUNT_VALIDATOR_HASH, CARDANO_CUSTODY_LOGIC_HASH } = sdk;
 
 export const BLOCKFROST_ORIGIN = "https://cardano-preprod.blockfrost.io";
+/** The account proxy: the payment script of every account address and the policy of every account token. */
+export const ACCOUNT_PROXY_HASH: string = CARDANO_CUSTODY_ACCOUNT_VALIDATOR_HASH;
+/** The logic new accounts run, logic version 1: what a control datum names first. */
+export const LOGIC_HASH: string = CARDANO_CUSTODY_LOGIC_HASH;
+/** The script reward account through which a transaction runs logic version 1. */
+export const LOGIC_REWARD_ACCOUNT: string = Cardano.RewardAccount.fromCredential(
+  { type: Cardano.CredentialType.ScriptHash, hash: CARDANO_CUSTODY_LOGIC_HASH },
+  Cardano.NetworkId.Testnet,
+);
 /** Where test funds come from: a key nobody holds. */
-const FAUCET_ADDRESS: string = Cardano.EnterpriseAddress.fromCredentials(Cardano.NetworkId.Testnet, { type: Cardano.CredentialType.KeyHash, hash: "fa".repeat(28) })
+const FAUCET_ADDRESS: string = Cardano.EnterpriseAddress.fromCredentials(Cardano.NetworkId.Testnet, { type: Cardano.CredentialType.KeyHash, hash: "fa".repeat(28) as never })
   .toAddress()
   .toBech32();
 const KEY_DEPOSIT = 2_000_000n;
+/** The number of fields of a revision 3 control datum: logic, devices, grant generation, next slot, revoked slots, outstanding grants. */
+const CONTROL_DATUM_FIELDS = 6;
 
 const parameters = JSON.parse(readFileSync(new URL("./fixtures/preprod-parameters.json", import.meta.url), "utf8")) as Record<string, unknown>;
 const parameter = (name: string): bigint => BigInt(parameters[name] as number | string);
+/** The cost models as the chain holds them: one array per Plutus language. */
+const COST_MODELS = parameters.cost_models_raw as Record<string, number[]>;
+
+type ParkedScript = { scriptHash: string; txId: string; index: number; address: string; lovelace: string; compiledCode: string };
+/** The UTxOs that park the account proxy and logic version 1 on Preprod, with each script's compiled code. */
+export const PARKED_SCRIPTS = (JSON.parse(readFileSync(new URL("./fixtures/preprod-reference-scripts.json", import.meta.url), "utf8")) as { references: ParkedScript[] }).references;
 
 /** A protocol parameter price as a fraction over 10^12. */
 const PRICE_DENOMINATOR = 10n ** 12n;
@@ -68,8 +90,12 @@ type Output = {
   dataHash: string | null;
   inlineDatum: string | null;
   referenceScriptHash: string | null;
-  /** Serialized size of the reference script, which the minimum fee charges for. */
+  /** Size of the reference script as the ledger prices it: a Plutus script's bytes. */
   referenceScriptSize?: number;
+  /** The reference script's compiled code, for the scripts endpoint. */
+  referenceScriptCode?: string;
+  /** The Plutus language of the reference script, for the script integrity hash. */
+  referenceScriptLanguage?: number;
 };
 type Utxo = Output & { txHash: string; index: number };
 type Block = { height: number; hash: string; slot: number; time: number; txHashes: string[] };
@@ -85,7 +111,7 @@ type LedgerTx = {
   outputs: Utxo[];
   invalidBefore: number | null;
   invalidHereafter: number | null;
-  withdrawalCount: number;
+  withdrawals: { rewardAccount: string; quantity: bigint }[];
   certificateCount: number;
   mintCount: number;
   redeemerCount: number;
@@ -97,12 +123,17 @@ type StakeAccount = {
   withdrawn: bigint;
   registrations: { txHash: string; action: "registered" | "deregistered" }[];
 };
+type TxIn = { txId: string; index: number };
+type Credential = { type: number; hash: string };
+/** What a redeemer points at, with the script that must run for it. */
+type ScriptItem = { purpose: string; index: number; scriptHash: string; utxo?: Utxo; rewardAccount?: string };
 
 export type SubmissionRecord = { txHash: string; accepted: boolean; message?: string };
 export type BlockfrostRequest = { method: string; path: string; frameOrigin: string | undefined; headerOrigin: string | undefined };
 
 const outpointKey = (txHash: string, index: number) => `${txHash}#${index}`;
 const blake2b256 = (hex: string) => bytesToHex(blake2b(hexToBytes(hex), { dkLen: 32 }));
+const compareTxIn = (a: TxIn, b: TxIn) => (a.txId === b.txId ? a.index - b.index : a.txId < b.txId ? -1 : 1);
 
 /** Asset map keyed by Blockfrost unit, with lovelace as `lovelace`. */
 type Assets = Map<string, bigint>;
@@ -120,6 +151,22 @@ const amountOf = (assets: Assets): Amount[] => [
   ...[...assets].filter(([unit, quantity]) => unit !== "lovelace" && quantity !== 0n).map(([unit, quantity]) => ({ unit, quantity: `${quantity}` })),
 ];
 
+/** Whether a UTxO holds an account's state NFT: an account token named by a 28-byte stake script hash. */
+const holdsStateNft = (utxo: Utxo) => utxo.amount.some(({ unit }) => unit.startsWith(ACCOUNT_PROXY_HASH) && unit.length === 56 + 56);
+/** Whether a UTxO holds a grant token: an account token named by the stake script hash and a 4-byte slot. */
+const holdsGrantToken = (utxo: Utxo) => utxo.amount.some(({ unit }) => unit.startsWith(ACCOUNT_PROXY_HASH) && unit.length === 56 + 64);
+
+const scriptHashOf = (script: unknown): string => Serialization.Script.fromCore(script as never).hash();
+
+/**
+ * The ledger's order of reward accounts, for withdrawal redeemer indexes:
+ * by network, then script credentials before key credentials, then hash.
+ */
+const rewardAccountOrder = (account: string): string => {
+  const credential = Cardano.Address.fromString(account)?.asReward()?.getPaymentCredential();
+  return `${credential?.type === Cardano.CredentialType.ScriptHash ? 0 : 1}${credential?.hash ?? account}`;
+};
+
 class LedgerError extends Error {}
 
 export class FakeLedger {
@@ -132,12 +179,17 @@ export class FakeLedger {
   readonly #addressTxs = new Map<string, string[]>();
   readonly #stake = new Map<string, StakeAccount>();
   #faucetNonce = 0;
+  /** Accepted transactions not yet applied, while a test holds them back. */
+  #held: { hash: string; inputs: string[]; apply: () => void }[] | undefined;
   /** POSIX milliseconds of the ledger's clock; the tip follows it. */
   readonly now: () => number;
 
   constructor(now: () => number = Date.now) {
     this.now = now;
     this.#addBlock([]);
+    this.#parkScripts();
+    // Logic version 1's stake credential, registered once on Preprod outside Lace.
+    this.#stake.set(LOGIC_REWARD_ACCOUNT, { registered: true, poolId: null, rewards: 0n, withdrawn: 0n, registrations: [] });
   }
 
   // --- Chain state ---
@@ -163,10 +215,44 @@ export class FakeLedger {
     return block;
   }
 
-  /** Fee and deposit of an applied transaction. */
-  transaction(hash: string): { fee: bigint; deposit: bigint } | undefined {
+  /** The UTxOs upstream's network setup parked the scripts in, at their Preprod output references. */
+  #parkScripts() {
+    for (const parked of PARKED_SCRIPTS) {
+      const script = { __type: "plutus", bytes: parked.compiledCode, version: Cardano.PlutusLanguageVersion.V3 };
+      if (scriptHashOf(script) !== parked.scriptHash) throw new Error(`The parked script at ${parked.txId}#${parked.index} does not hash to ${parked.scriptHash}`);
+      const output: Utxo = {
+        txHash: parked.txId,
+        index: parked.index,
+        address: parked.address,
+        amount: [{ unit: "lovelace", quantity: parked.lovelace }],
+        dataHash: null,
+        inlineDatum: null,
+        referenceScriptHash: parked.scriptHash,
+        referenceScriptSize: parked.compiledCode.length / 2,
+        referenceScriptCode: parked.compiledCode,
+        referenceScriptLanguage: Cardano.PlutusLanguageVersion.V3,
+      };
+      this.#utxos.set(outpointKey(parked.txId, parked.index), output);
+      this.#record({ hash: parked.txId, cbor: "", block: this.#blocks[0], index: 0, fee: 0n, deposit: 0n, size: 0, inputs: [], outputs: [output], invalidBefore: null, invalidHereafter: null, withdrawals: [], certificateCount: 0, mintCount: 0, redeemerCount: 0 });
+    }
+  }
+
+  /** Fee, deposit, reference inputs and withdrawals of an applied transaction. */
+  transaction(hash: string): { fee: bigint; deposit: bigint; referenceInputs: string[]; withdrawals: { rewardAccount: string; quantity: bigint }[] } | undefined {
     const tx = this.#txs.get(hash);
-    return tx && { fee: tx.fee, deposit: tx.deposit };
+    return (
+      tx && {
+        fee: tx.fee,
+        deposit: tx.deposit,
+        referenceInputs: tx.inputs.filter((input) => input.reference).map((input) => outpointKey(input.txHash, input.index)),
+        withdrawals: tx.withdrawals,
+      }
+    );
+  }
+
+  /** The unspent output at an output reference. */
+  output(txId: string, index: number): Utxo | undefined {
+    return this.#utxos.get(outpointKey(txId, index));
   }
 
   utxosAt(address: string): Utxo[] {
@@ -177,8 +263,12 @@ export class FakeLedger {
     return this.utxosAt(address).reduce((total, utxo) => total + (assetsOfAmount(utxo.amount).get("lovelace") ?? 0n), 0n);
   }
 
-  /** Pays `lovelace` to `address` from outside the ledger, in a block of its own. */
-  fund(address: string, lovelace: bigint): string {
+  /**
+   * Pays `lovelace` to `address` from outside the ledger, in a block of its
+   * own. A unit test may also conjure `assets` and an inline datum, as no
+   * real transaction could.
+   */
+  fund(address: string, lovelace: bigint, { assets = new Map(), inlineDatum = null }: { assets?: Map<string, bigint>; inlineDatum?: string | null } = {}): string {
     const tx = Serialization.Transaction.fromCore({
       id: "0".repeat(64),
       body: {
@@ -187,21 +277,34 @@ export class FakeLedger {
         fee: 0n,
       },
       witness: { signatures: new Map() },
-    });
+    } as never);
     const hash = tx.getId() as string;
     const block = this.#addBlock([hash]);
-    const outputs = [{ txHash: hash, index: 0, address, amount: [{ unit: "lovelace", quantity: `${lovelace}` }], dataHash: null, inlineDatum: null, referenceScriptHash: null }];
+    const value: Assets = new Map([["lovelace", lovelace], ...assets]);
+    const outputs: Utxo[] = [{ txHash: hash, index: 0, address, amount: amountOf(value), dataHash: inlineDatum ? blake2b256(inlineDatum) : null, inlineDatum, referenceScriptHash: null }];
     const faucetInput = { txHash: "fa".repeat(32), index: this.#faucetNonce - 1, address: FAUCET_ADDRESS, amount: outputs[0].amount, dataHash: null, inlineDatum: null, referenceScriptHash: null, collateral: false, reference: false };
-    this.#record({ hash, cbor: tx.toCbor(), block, index: 0, fee: 0n, deposit: 0n, size: tx.toCbor().length / 2, inputs: [faucetInput], outputs, invalidBefore: null, invalidHereafter: null, withdrawalCount: 0, certificateCount: 0, mintCount: 0, redeemerCount: 0 });
+    this.#record({ hash, cbor: tx.toCbor(), block, index: 0, fee: 0n, deposit: 0n, size: tx.toCbor().length / 2, inputs: [faucetInput], outputs, invalidBefore: null, invalidHereafter: null, withdrawals: [], certificateCount: 0, mintCount: 0, redeemerCount: 0 });
     for (const output of outputs) this.#utxos.set(outpointKey(output.txHash, output.index), output);
     return hash;
   }
 
-  /** Credits rewards to a registered reward account. */
+  /** Credits rewards to a registered reward account, as a pool naming it as its reward account would. */
   addRewards(rewardAccount: string, lovelace: bigint): void {
     const account = this.#stake.get(rewardAccount);
     if (!account?.registered) throw new Error(`${rewardAccount} is not registered`);
     account.rewards += lovelace;
+  }
+
+  /** Accepts later submissions without applying them, as a mempool holds them, until `releaseSubmissions`. */
+  holdSubmissions(): void {
+    this.#held ??= [];
+  }
+
+  /** Applies the held submissions, in order, and applies later ones at once. */
+  releaseSubmissions(): void {
+    const held = this.#held ?? [];
+    this.#held = undefined;
+    for (const { apply } of held) apply();
   }
 
   #record(tx: LedgerTx) {
@@ -212,7 +315,7 @@ export class FakeLedger {
 
   // --- Transactions ---
 
-  #resolve(txIn: { txId: string; index: number }, what: string): Utxo {
+  #resolve(txIn: TxIn, what: string): Utxo {
     const utxo = this.#utxos.get(outpointKey(txIn.txId, txIn.index));
     if (!utxo) throw new LedgerError(`${what} ${txIn.txId}#${txIn.index} is not an unspent output`);
     return utxo;
@@ -223,6 +326,7 @@ export class FakeLedger {
     const inlineDatum: string | null = serialized.datum()?.asInlineData()?.toCbor() ?? null;
     const dataHash: string | null = inlineDatum ? blake2b256(inlineDatum) : (core.datumHash ?? null);
     const scriptRef = serialized.scriptRef();
+    const script = scriptRef?.toCore();
     return {
       txHash,
       index,
@@ -232,7 +336,11 @@ export class FakeLedger {
       dataHash,
       inlineDatum,
       referenceScriptHash: scriptRef ? scriptRef.hash() : null,
-      ...(scriptRef ? { referenceScriptSize: scriptRef.toCbor().length / 2 } : {}),
+      ...(scriptRef
+        ? script?.__type === "plutus"
+          ? { referenceScriptSize: script.bytes.length / 2, referenceScriptCode: script.bytes, referenceScriptLanguage: script.version }
+          : { referenceScriptSize: scriptRef.toCbor().length / 2 }
+        : {}),
     };
   }
 
@@ -241,14 +349,131 @@ export class FakeLedger {
     return parameter("coins_per_utxo_size") * (BigInt(serialized.toCbor().length / 2) + 160n);
   }
 
+  #paymentCredential(address: string): Credential | undefined {
+    return Cardano.Address.fromString(address)?.getProps().paymentPart as Credential | undefined;
+  }
+
   #paymentKeyHash(address: string): string | undefined {
-    const payment = Cardano.Address.fromString(address)?.getProps().paymentPart;
+    const payment = this.#paymentCredential(address);
     return payment?.type === Cardano.CredentialType.KeyHash ? payment.hash : undefined;
   }
 
   #rewardAccountOf(address: string): string | undefined {
     const stake = Cardano.Address.fromString(address)?.asBase()?.getStakeCredential();
     return stake ? Cardano.RewardAccount.fromCredential(stake, Cardano.NetworkId.Testnet) : undefined;
+  }
+
+  /**
+   * Every item a script must run for, in redeemer pointer order: script
+   * inputs by output reference, mint policies by hash, certificates in
+   * order, and withdrawals in the ledger's reward account order.
+   */
+  #scriptItems(body: any, inputs: Utxo[]): ScriptItem[] {
+    const items: ScriptItem[] = [];
+    const sortedInputs = [...body.inputs].sort(compareTxIn).map((txIn: TxIn) => inputs.find((utxo) => utxo.txHash === txIn.txId && utxo.index === txIn.index)!);
+    sortedInputs.forEach((utxo, index) => {
+      const payment = this.#paymentCredential(utxo.address);
+      if (payment?.type === Cardano.CredentialType.ScriptHash) items.push({ purpose: Cardano.RedeemerPurpose.spend, index, scriptHash: payment.hash, utxo });
+    });
+    const policies = [...new Set([...(body.mint ?? new Map()).keys()].map((assetId: string) => assetId.slice(0, 56)))].sort();
+    policies.forEach((policyId, index) => items.push({ purpose: Cardano.RedeemerPurpose.mint, index, scriptHash: policyId }));
+    (body.certificates ?? []).forEach((certificate: { __typename: string; stakeCredential?: Credential }, index: number) => {
+      // A pre-Conway registration without a deposit needs no witness.
+      if (certificate.__typename === Cardano.CertificateType.StakeRegistration) return;
+      if (certificate.stakeCredential?.type === Cardano.CredentialType.ScriptHash) {
+        items.push({ purpose: Cardano.RedeemerPurpose.certificate, index, scriptHash: certificate.stakeCredential.hash });
+      }
+    });
+    const withdrawals = [...(body.withdrawals ?? [])].sort((a: { stakeAddress: string }, b: { stakeAddress: string }) =>
+      rewardAccountOrder(a.stakeAddress) < rewardAccountOrder(b.stakeAddress) ? -1 : 1,
+    );
+    withdrawals.forEach(({ stakeAddress }: { stakeAddress: string }, index: number) => {
+      const credential = Cardano.Address.fromString(stakeAddress)?.asReward()?.getPaymentCredential();
+      if (credential?.type === Cardano.CredentialType.ScriptHash) {
+        items.push({ purpose: Cardano.RedeemerPurpose.withdrawal, index, scriptHash: credential.hash, rewardAccount: stakeAddress });
+      }
+    });
+    return items;
+  }
+
+  /** The logic the account proxy runs for this transaction: what the control datum names in its first field. */
+  #controlLogic(spentAndReferenced: Utxo[], outputs: Utxo[]): string {
+    // An operation reads the control UTxO it spends or references; a creation the control output it writes.
+    const control = spentAndReferenced.find(holdsStateNft) ?? outputs.find(holdsStateNft);
+    if (!control?.inlineDatum) throw new LedgerError("ValidationTagMismatch: the account proxy found no control UTxO with an inline datum");
+    let fields: unknown[];
+    try {
+      const datum = Serialization.PlutusData.fromCbor(HexBlob(control.inlineDatum)).toCore() as { constructor?: unknown; fields?: { items: unknown[] } };
+      if (typeof datum.constructor !== "bigint" || !datum.fields) throw new Error("not a constructor");
+      fields = datum.fields.items;
+    } catch {
+      throw new LedgerError("ValidationTagMismatch: the control datum does not decode");
+    }
+    const [logic] = fields;
+    if (fields.length !== CONTROL_DATUM_FIELDS || !(logic instanceof Uint8Array) || logic.length !== 28) {
+      throw new LedgerError(`ValidationTagMismatch: the control datum has ${fields.length} fields and does not name a logic first`);
+    }
+    return bytesToHex(logic);
+  }
+
+  /**
+   * The checks that hold for evaluation and submission alike: every script
+   * is attached or read from a reference input, and none is attached for
+   * nothing or besides its reference; every script item has a redeemer and
+   * every redeemer an item;
+   * and the account proxy runs the logic the control datum names.
+   */
+  #checkScripts(core: any, inputs: Utxo[], references: Utxo[], outputs: Utxo[]): ScriptItem[] {
+    const body = core.body;
+    const items = this.#scriptItems(body, inputs);
+    const needed = new Set(items.map(({ scriptHash }) => scriptHash));
+    const attached = new Set<string>((core.witness.scripts ?? []).map(scriptHashOf));
+    const referenced = new Set([...inputs, ...references].map((utxo) => utxo.referenceScriptHash).filter((hash): hash is string => hash !== null));
+    const missing = [...needed].filter((hash) => !attached.has(hash) && !referenced.has(hash));
+    if (missing.length > 0) throw new LedgerError(`MissingScriptWitnessesUTXOW: ${missing.join(", ")}`);
+    // A script needed and also read from a reference input must not be attached as well.
+    const extraneous = [...attached].filter((hash) => !needed.has(hash) || referenced.has(hash));
+    if (extraneous.length > 0) throw new LedgerError(`ExtraneousScriptWitnessesUTXOW: ${extraneous.join(", ")}`);
+
+    const redeemers: { purpose: string; index: number }[] = core.witness.redeemers ?? [];
+    const pointer = ({ purpose, index }: { purpose: string; index: number }) => `${purpose}:${index}`;
+    const itemPointers = new Set(items.map(pointer));
+    const redeemerPointers = new Set(redeemers.map(pointer));
+    const unredeemed = [...itemPointers].filter((key) => !redeemerPointers.has(key));
+    if (unredeemed.length > 0) throw new LedgerError(`MissingRedeemers: ${unredeemed.join(", ")}`);
+    const pointless = [...redeemerPointers].filter((key) => !itemPointers.has(key));
+    if (pointless.length > 0) throw new LedgerError(`ExtraRedeemers: ${pointless.join(", ")}`);
+
+    if (needed.has(ACCOUNT_PROXY_HASH)) {
+      const logic = this.#controlLogic([...inputs, ...references], outputs);
+      const runs = items.some(({ purpose, scriptHash }) => purpose === Cardano.RedeemerPurpose.withdrawal && scriptHash === logic);
+      if (!runs) throw new LedgerError(`ValidationTagMismatch: the account proxy runs logic ${logic} through a withdrawal from its reward account, which the transaction lacks`);
+    }
+    return items;
+  }
+
+  /**
+   * The script integrity hash a node computes: the redeemers and datums as
+   * the witness set encodes them, then the language views of the cost
+   * models of the Plutus languages the transaction runs.
+   */
+  #scriptIntegrityHash(tx: any, core: any, items: ScriptItem[], inputs: Utxo[], references: Utxo[]): string | undefined {
+    const hasRedeemers = (core.witness.redeemers ?? []).length > 0;
+    const hasDatums = (core.witness.datums ?? []).length > 0;
+    if (!hasRedeemers && !hasDatums) return undefined;
+    const languages = new Set<number>();
+    for (const { scriptHash } of items) {
+      const attached = (core.witness.scripts ?? []).find((script: unknown) => scriptHashOf(script) === scriptHash);
+      const language = attached ? (attached.__type === "plutus" ? attached.version : undefined) : [...inputs, ...references].find((utxo) => utxo.referenceScriptHash === scriptHash)?.referenceScriptLanguage;
+      if (language !== undefined) languages.add(language);
+    }
+    const costModels = new Serialization.Costmdls();
+    for (const language of languages) costModels.insert(new Serialization.CostModel(language, COST_MODELS[`PlutusV${language + 1}`]));
+    const witnessSet = tx.witnessSet();
+    // Without redeemers, the ledger hashes an empty redeemer map and no language views.
+    const redeemers = hasRedeemers ? witnessSet.redeemers().toCbor() : "a0";
+    const datums = hasDatums ? witnessSet.plutusData().toCbor() : "";
+    return blake2b256(`${redeemers}${datums}${hasRedeemers ? costModels.languageViewsEncoding() : "a0"}`);
   }
 
   /** Applies a signed transaction, or throws with the reason a node would give. */
@@ -269,10 +494,14 @@ export class FakeLedger {
     if (invalidHereafter !== undefined && slot >= invalidHereafter) throw new LedgerError(`OutsideValidityIntervalUTxO: slot ${slot} is at or past ${invalidHereafter}`);
     if (invalidBefore !== undefined && slot < invalidBefore) throw new LedgerError(`OutsideValidityIntervalUTxO: slot ${slot} is before ${invalidBefore}`);
 
-    const inputs = body.inputs.map((input: { txId: string; index: number }) => this.#resolve(input, "Input"));
-    const collaterals = (body.collaterals ?? []).map((input: { txId: string; index: number }) => this.#resolve(input, "Collateral"));
-    const references = (body.referenceInputs ?? []).map((input: { txId: string; index: number }) => this.#resolve(input, "Reference input"));
+    const inputs = body.inputs.map((input: TxIn) => this.#resolve(input, "Input"));
+    const pending = new Set((this.#held ?? []).flatMap((held) => held.inputs));
+    const contended = body.inputs.find((input: TxIn) => pending.has(outpointKey(input.txId, input.index)));
+    if (contended) throw new LedgerError(`BadInputsUTxO: ${contended.txId}#${contended.index} is spent by a transaction in the mempool`);
+    const collaterals = (body.collaterals ?? []).map((input: TxIn) => this.#resolve(input, "Collateral"));
+    const references = (body.referenceInputs ?? []).map((input: TxIn) => this.#resolve(input, "Reference input"));
     const redeemers: { executionUnits: { memory: number; steps: number } }[] = core.witness.redeemers ?? [];
+    const outputs: Utxo[] = tx.body().outputs().map((output: unknown, index: number) => this.#outputOf(output, hash, index));
 
     // Size, execution units and the minimum fee. The ledger sizes a
     // transaction without its is_valid flag (`toCBORForSizeComputation`): one
@@ -328,6 +557,12 @@ export class FakeLedger {
     const missing = [...needed].filter((keyHash) => !signers.has(keyHash));
     if (missing.length > 0) throw new LedgerError(`MissingVKeyWitnessesUTXOW: ${missing.join(", ")}`);
 
+    const items = this.#checkScripts(core, inputs, references, outputs);
+    const integrity = this.#scriptIntegrityHash(tx, core, items, inputs, references);
+    if (integrity === undefined && body.scriptIntegrityHash !== undefined) throw new LedgerError(`PPViewHashesDontMatch: the body commits to ${body.scriptIntegrityHash} for no redeemers or datums`);
+    if (integrity !== undefined && body.scriptIntegrityHash === undefined) throw new LedgerError("MissingRequiredScriptIntegrityHash");
+    if (integrity !== body.scriptIntegrityHash) throw new LedgerError(`PPViewHashesDontMatch: the body commits to ${body.scriptIntegrityHash}, the ledger computes ${integrity}`);
+
     // Value: inputs + withdrawals + mint = outputs + fee + deposits.
     let deposit = 0n;
     const certificateEffects: (() => void)[] = [];
@@ -358,12 +593,12 @@ export class FakeLedger {
     const consumed: Assets = new Map();
     for (const utxo of inputs) addAssets(consumed, assetsOfAmount(utxo.amount));
     for (const { stakeAddress, quantity } of body.withdrawals ?? []) {
+      // A withdrawal takes the whole reward balance or fails.
       const account = this.#stake.get(stakeAddress);
       if (!account?.registered || account.rewards !== quantity) throw new LedgerError(`WithdrawalsNotInRewardsCERTS: ${stakeAddress} ${quantity}`);
       addAssets(consumed, new Map([["lovelace", quantity]]));
     }
     for (const [assetId, quantity] of body.mint ?? new Map()) addAssets(consumed, new Map([[assetId as string, quantity as bigint]]));
-    const outputs: Utxo[] = tx.body().outputs().map((output: unknown, index: number) => this.#outputOf(output, hash, index));
     const produced: Assets = new Map([["lovelace", body.fee + deposit]]);
     for (const output of outputs) addAssets(produced, assetsOfAmount(output.amount));
     for (const unit of new Set([...consumed.keys(), ...produced.keys()])) {
@@ -375,59 +610,64 @@ export class FakeLedger {
       if (output.address.startsWith("addr_test1") === false) throw new LedgerError(`WrongNetwork: ${output.address}`);
     }
 
-    // Apply.
-    for (const effect of certificateEffects) effect();
-    for (const { stakeAddress } of body.withdrawals ?? []) {
-      const account = this.#stake.get(stakeAddress)!;
-      account.withdrawn += account.rewards;
-      account.rewards = 0n;
-    }
-    for (const input of body.inputs) this.#utxos.delete(outpointKey(input.txId, input.index));
-    for (const output of outputs) this.#utxos.set(outpointKey(output.txHash, output.index), output);
-    const block = this.#addBlock([hash]);
-    this.#record({
-      hash,
-      cbor: cborHex,
-      block,
-      index: 0,
-      fee: body.fee,
-      deposit,
-      size: cborHex.length / 2,
-      inputs: [
-        ...inputs.map((utxo: Utxo) => ({ ...utxo, collateral: false, reference: false })),
-        ...collaterals.map((utxo: Utxo) => ({ ...utxo, collateral: true, reference: false })),
-        ...references.map((utxo: Utxo) => ({ ...utxo, collateral: false, reference: true })),
-      ],
-      outputs,
-      invalidBefore: invalidBefore ?? null,
-      invalidHereafter: invalidHereafter ?? null,
-      withdrawalCount: (body.withdrawals ?? []).length,
-      certificateCount: (body.certificates ?? []).length,
-      mintCount: body.mint?.size ?? 0,
-      redeemerCount: (core.witness.redeemers ?? []).length,
-    });
+    const apply = () => {
+      for (const effect of certificateEffects) effect();
+      for (const { stakeAddress } of body.withdrawals ?? []) {
+        const account = this.#stake.get(stakeAddress)!;
+        account.withdrawn += account.rewards;
+        account.rewards = 0n;
+      }
+      for (const input of body.inputs) this.#utxos.delete(outpointKey(input.txId, input.index));
+      for (const output of outputs) this.#utxos.set(outpointKey(output.txHash, output.index), output);
+      const block = this.#addBlock([hash]);
+      this.#record({
+        hash,
+        cbor: cborHex,
+        block,
+        index: 0,
+        fee: body.fee,
+        deposit,
+        size: cborHex.length / 2,
+        inputs: [
+          ...inputs.map((utxo: Utxo) => ({ ...utxo, collateral: false, reference: false })),
+          ...collaterals.map((utxo: Utxo) => ({ ...utxo, collateral: true, reference: false })),
+          ...references.map((utxo: Utxo) => ({ ...utxo, collateral: false, reference: true })),
+        ],
+        outputs,
+        invalidBefore: invalidBefore ?? null,
+        invalidHereafter: invalidHereafter ?? null,
+        withdrawals: (body.withdrawals ?? []).map(({ stakeAddress, quantity }: { stakeAddress: string; quantity: bigint }) => ({ rewardAccount: stakeAddress, quantity })),
+        certificateCount: (body.certificates ?? []).length,
+        mintCount: body.mint?.size ?? 0,
+        redeemerCount: redeemers.length,
+      });
+    };
+    if (this.#held) this.#held.push({ hash, inputs: body.inputs.map((input: TxIn) => outpointKey(input.txId, input.index)), apply });
+    else apply();
     return hash;
   }
 
-  /** Fixed budgets per redeemer, larger for the custody control input. */
+  /**
+   * Fixed budgets per redeemer, by the script it runs: the logic run is the
+   * heaviest, then the proxy over the control UTxO, a grant UTxO, a mint, a
+   * certificate and a fund. The transaction must pass the script checks a
+   * node would run first.
+   */
   evaluate(cborHex: string): Record<string, { memory: number; steps: number }> {
     const tx = Serialization.Transaction.fromCbor(Serialization.TxCBOR(cborHex));
     const core = tx.toCore();
-    const sortedInputs = [...core.body.inputs].sort((a: { txId: string; index: number }, b: { txId: string; index: number }) =>
-      a.txId === b.txId ? a.index - b.index : a.txId < b.txId ? -1 : 1,
-    );
+    const inputs = core.body.inputs.map((input: TxIn) => this.#resolve(input, "Input"));
+    const references = (core.body.referenceInputs ?? []).map((input: TxIn) => this.#resolve(input, "Reference input"));
+    const outputs = tx.body().outputs().map((output: unknown, index: number) => this.#outputOf(output, "0".repeat(64), index));
+    const items = this.#checkScripts(core, inputs, references, outputs);
     const result: Record<string, { memory: number; steps: number }> = {};
-    for (const { purpose, index } of core.witness.redeemers ?? []) {
-      let budget = { memory: 500_000, steps: 180_000_000 };
-      if (purpose === Cardano.RedeemerPurpose.spend) {
-        const input = sortedInputs[index];
-        if (!input) throw new LedgerError(`No input at redeemer index ${index}`);
-        const utxo = this.#resolve(input, "Input");
-        const isControl = utxo.amount.some(({ unit }) => unit.startsWith(CUSTODY_ACCOUNT_SCRIPT_HASH));
-        budget = isControl ? { memory: 1_400_000, steps: 520_000_000 } : { memory: 240_000, steps: 90_000_000 };
-      } else if (purpose === Cardano.RedeemerPurpose.mint) {
-        budget = { memory: 620_000, steps: 210_000_000 };
-      }
+    for (const { purpose, index, scriptHash, utxo } of items) {
+      let budget = { memory: 350_000, steps: 130_000_000 };
+      if (purpose === Cardano.RedeemerPurpose.withdrawal && scriptHash === CARDANO_CUSTODY_LOGIC_HASH) budget = { memory: 3_200_000, steps: 1_100_000_000 };
+      else if (purpose === Cardano.RedeemerPurpose.spend && utxo && holdsStateNft(utxo)) budget = { memory: 700_000, steps: 250_000_000 };
+      else if (purpose === Cardano.RedeemerPurpose.spend && utxo && holdsGrantToken(utxo)) budget = { memory: 500_000, steps: 180_000_000 };
+      else if (purpose === Cardano.RedeemerPurpose.spend) budget = { memory: 300_000, steps: 110_000_000 };
+      else if (purpose === Cardano.RedeemerPurpose.mint) budget = { memory: 450_000, steps: 160_000_000 };
       // Ogmios v5 names, as Blockfrost answers by default.
       result[`${purpose}:${index}`] = budget;
     }
@@ -444,7 +684,8 @@ export class FakeLedger {
       .reduce((total, utxo) => total + (assetsOfAmount(utxo.amount).get("lovelace") ?? 0n), 0n);
     return {
       stake_address: rewardAccount,
-      active: account.registered,
+      // Blockfrost reports a registered credential that delegates to no pool as not active.
+      active: account.registered && account.poolId !== null,
       registered: account.registered,
       active_epoch: account.registered ? preprodEpochOf(this.tip.slot) : null,
       controlled_amount: `${controlled + account.rewards}`,
@@ -490,7 +731,7 @@ export class FakeLedger {
       invalid_before: tx.invalidBefore === null ? null : `${tx.invalidBefore}`,
       invalid_hereafter: tx.invalidHereafter === null ? null : `${tx.invalidHereafter}`,
       utxo_count: tx.inputs.length + tx.outputs.length,
-      withdrawal_count: tx.withdrawalCount,
+      withdrawal_count: tx.withdrawals.length,
       mir_cert_count: 0,
       delegation_count: 0,
       stake_cert_count: tx.certificateCount,
@@ -522,6 +763,11 @@ export class FakeLedger {
         parameters: { epoch_length: PREPROD_EPOCH_LENGTH, slot_length: 1, safe_zone: 129_600 },
       },
     ];
+  }
+
+  /** The reference script with this hash some UTxO of the ledger carries. */
+  #referenceScript(hash: string): Utxo | undefined {
+    return [...this.#utxos.values()].find((utxo) => utxo.referenceScriptHash === hash && utxo.referenceScriptCode);
   }
 
   /** The Blockfrost answer to one request, or undefined for an unknown endpoint. */
@@ -595,6 +841,14 @@ export class FakeLedger {
       const account = this.#account(match[1]);
       return account ? ok(account) : notFound;
     }
+    if ((match = /^scripts\/([0-9a-f]{56})\/cbor$/.exec(path))) {
+      const utxo = this.#referenceScript(match[1]);
+      return utxo ? ok({ cbor: utxo.referenceScriptCode }) : notFound;
+    }
+    if ((match = /^scripts\/([0-9a-f]{56})$/.exec(path))) {
+      const utxo = this.#referenceScript(match[1]);
+      return utxo ? ok({ script_hash: match[1], type: "plutusV3", serialised_size: utxo.referenceScriptSize }) : notFound;
+    }
     if ((match = /^txs\/([0-9a-f]{64})\/utxos$/.exec(path))) {
       const tx = this.#txs.get(match[1]);
       if (!tx) return notFound;
@@ -607,7 +861,7 @@ export class FakeLedger {
     }
     if ((match = /^txs\/([0-9a-f]{64})\/cbor$/.exec(path))) {
       const tx = this.#txs.get(match[1]);
-      return tx ? ok({ cbor: tx.cbor }) : notFound;
+      return tx?.cbor ? ok({ cbor: tx.cbor }) : notFound;
     }
     if ((match = /^txs\/([0-9a-f]{64})\/(metadata|redeemers|withdrawals|stakes|delegations|mirs|pool_updates|pool_retires|required_signers)$/.exec(path))) {
       return this.#txs.has(match[1]) ? ok([]) : notFound;

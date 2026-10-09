@@ -17,7 +17,7 @@
       <pre id="out"></pre>
       <pre id="address-output"></pre>
       <pre id="balance-output"></pre>
-      <p>Cardano Preprod only. Passkeys and signing stay on the hosted Lace signer. This demo uses a local PR SDK build.</p>
+      <p>Cardano Preprod only. Passkeys and signing stay on the hosted Lace signer. This demo uses an SDK build vendored from a pull request.</p>
       <p>Create or open connects to the signer popup. On first use, choose an existing passkey or create a new wallet there, then approve sharing your Cardano account. An existing signer credential is reused. Each signature requires another approval and passkey prompt.</p>
       <button id="create-passkey" hidden>Create passkey wallet</button>
       <button id="open-passkey" hidden>Open passkey wallet</button>
@@ -36,12 +36,13 @@
 
       <section id="custody">
         <h2>Cardano custody account (proof of concept)</h2>
-        <p>The custody contract is unaudited; use Preprod test ADA only. Device keys come from the hosted signer passkey (CIP-1854). The fee sponsor below is a development stand-in with an in-memory key: fund its address with one 5 ADA collateral UTxO and one fee UTxO of at least 10 ADA.</p>
+        <p>The custody contract (revision 3) is unaudited; use Preprod test ADA only. Device keys come from the hosted signer passkey (CIP-1854). The hosted fee sponsor pays the account creation and lends collateral to every later transaction; this page reaches it through the <code>/sponsor</code> relay of its own server, which holds the sponsor key. Every later transaction pays its own fee from the account.</p>
         <pre id="sponsor-output"></pre>
         <button id="custody-device-key">Share custody device key</button>
         <button id="custody-create" disabled>Create custody account</button>
         <button id="custody-open" hidden>Open saved custody account</button>
         <button id="custody-issue-grant" disabled>Grant agent spending</button>
+        <button id="custody-export-policy" disabled>Export agent policy</button>
         <button id="custody-revoke-grant" disabled>Revoke agent grant</button>
         <pre id="custody-device"></pre>
         <pre id="custody-state"></pre>

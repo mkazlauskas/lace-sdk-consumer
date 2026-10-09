@@ -4,8 +4,9 @@ import { readFile } from "node:fs/promises";
 import { resolve, extname } from "node:path";
 import type { BrowserContext, Page, Request } from "@playwright/test";
 
-// Serve the real PR signer build at an intercepted HTTPS origin. This tests
-// cross-origin messaging and real signing, without depending on deployment.
+// Serve a real signer build at the intercepted preview signer origin. This
+// tests cross-origin messaging and real signing, without depending on the
+// deployment.
 export const signerOrigin = "https://passkey-preview.lace.io";
 export const signerDist = resolve(process.env.SIGNER_DIST ?? "../lace-platform/.agents/workspaces/lw-15692-custody/apps/lace-passkey-signer/dist");
 const mime: Record<string, string> = { ".js": "application/javascript", ".css": "text/css", ".wasm": "application/wasm", ".html": "text/html", ".png": "image/png", ".otf": "font/otf", ".ttf": "font/ttf" };
@@ -25,6 +26,22 @@ function checkSignerBuild() {
   }
   console.log(`Signer build: ${signerDist}, index.html SHA-256 ${digest}${expected ? " (as expected)" : ""}`);
   signerBuildChecked = true;
+}
+
+/**
+ * Fails unless the served build lists `appOrigin` among the dApp origins it
+ * serves custody requests for. The list is fixed at build time
+ * (`VITE_CUSTODY_ALLOWED_ORIGINS`); a build without it refuses every custody
+ * request with `custody-origin-not-allowed`.
+ */
+export function assertSignerServesCustodyFor(appOrigin: string) {
+  const index = readFileSync(resolve(signerDist, "index.html"), "utf8");
+  const entry = /src="\.\/(assets\/index-[^"]+\.js)"/.exec(index)?.[1];
+  const code = entry ? readFileSync(resolve(signerDist, entry), "utf8") : "";
+  const origins = /VITE_CUSTODY_ALLOWED_ORIGINS:"([^"]*)"/.exec(code)?.[1] ?? "";
+  if (!origins.split(/[\s,]+/).includes(appOrigin)) {
+    throw new Error(`Signer build ${signerDist} serves custody requests for "${origins}", not ${appOrigin}. Build it with VITE_CUSTODY_ALLOWED_ORIGINS=${appOrigin}.`);
+  }
 }
 
 export type Credential = { credentialId: string; isResidentCredential: boolean; rpId?: string; privateKey: string; userHandle?: string; signCount: number };

@@ -3,9 +3,9 @@ import { blake2b } from "@noble/hashes/blake2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
 /**
- * A raw Ed25519 key held in memory, as a development fee sponsor or an
- * agent's own wallet holds one. It never leaves this page and is lost on
- * reload. Use it with Preprod test ADA only.
+ * A raw Ed25519 key held in memory, as an agent's own wallet holds one. It
+ * never leaves this page and is lost on reload. Use it with Preprod test ADA
+ * only.
  */
 export type DevKey = {
   /** 32-byte Ed25519 public key, hex. */

@@ -71,7 +71,7 @@ const RECIPIENT = Cardano.PaymentAddress(
 ui.setRecipient(RECIPIENT);
 
 let allAddresses: Parameters<typeof selectAccountAddress>[0] = [];
-let utxosByAccount: Parameters<typeof selectAccountUtxos>[0] = {};
+let utxosByAccount: Partial<Record<string, Cardano.Utxo[]>> = {};
 let latestAddress: Cardano.PaymentAddress | undefined;
 let latestUtxos: Cardano.Utxo[] = [];
 
