@@ -1,37 +1,79 @@
-# Lace SDK consumer: passkey Cardano wallet
+# Lace SDK consumer: passkey wallet and Cardano custody account
 
-Testnet-only Cardano Preprod demo using `@input-output-hk/lace-sdk/cardano`. It creates and opens a wallet with a WebAuthn PRF passkey. No recovery phrase is shown or exported. Web3Auth funds are not migrated. This rebased SDK tarball is unpublished; final evidence needs a published prerelease and a fresh run on real passkey providers.
+Testnet-only Cardano Preprod demo of `@input-output-hk/lace-sdk/cardano`. It has two parts:
 
-> The current consumer uses the hosted Lace signer and adds a Cardano custody account proof of concept. See [HOSTED-SIGNER.md](HOSTED-SIGNER.md) for both flows, the SDK tarball identity and the verification evidence. The sections below describe the earlier local-passkey flow.
+- A passkey wallet whose keys stay in the hosted Lace signer, `https://passkey-preview.lace.io`. No recovery phrase is shown or exported.
+- A proof of concept of a Cardano custody account on custody contract revision 3. The hosted fee sponsor, `https://sponsor-preprod.lw.iog.io`, pays for the account's creation and lends collateral to every later transaction. The browser reaches the sponsor through a relay on the Vite server, which holds the sponsor key.
+
+[HOSTED-SIGNER.md](HOSTED-SIGNER.md) describes both flows step by step, the tests and the verification evidence.
+
+> **Warning:** The custody contract is unaudited. Use Preprod test ADA only.
+
+## SDK package
+
+The SDK is vendored as `vendor/input-output-hk-lace-sdk-0.1.0-fe9d709f7.tgz`, an `npm pack` of lace-platform PR #2825 at commit `fe9d709f71dcb1d9f134c095568850c55450a5c0`. Its tree is the same as the published `0.1.0-dev.11`. SHA-256: `24acbaaa934613f7b27abb3c116281660dd622f912868aa6c4af1e4de8b9b9e9`. Type checks, unit tests, the production build and the browser suite pass with this package.
 
 ## Start
 
-SDK tarball: `/tmp/opencode/input-output-hk-lace-sdk-0.1.0-lw15585.34eb91daf.tgz`, source commit `34eb91dafaf59ea0b28263ec9f44ae95bebf8ef9`, SHA-256 `77e6c3c7c488f02ddf5038d4290fedf435c054578633718070b2780313cc3bd7`.
+1. Install and check the package:
 
-```bash
-cd /home/mkazlauskas/Code/iog/lace-sdk-consumer
-sha256sum /tmp/opencode/input-output-hk-lace-sdk-0.1.0-lw15585.34eb91daf.tgz
-npm install
-test -e .env || cp .env.example .env
-# Set VITE_BLOCKFROST_URL_PREPROD and VITE_BLOCKFROST_PROJECT_ID_PREPROD in .env for live Preprod data
-npm run typecheck
-npm test
-npm run build
-npm run dev -- --host localhost
-```
+   ```bash
+   cd /home/mkazlauskas/Code/iog/lace-sdk-consumer
+   sha256sum vendor/input-output-hk-lace-sdk-0.1.0-fe9d709f7.tgz
+   npm ci
+   test -e .env || cp .env.example .env
+   ```
 
-Open `http://localhost:5173/`, or the port Vite reports. RP ID is `localhost`; `127.0.0.1` and other hosts are rejected. Browser and passkey provider must support WebAuthn PRF. First **Create passkey wallet** asks twice: credential creation, then assertion for wallet derivation. Reload and choose **Open passkey wallet**. Only non-secret metadata (`credentialId`, `rpId`, `recipeVersion`, public fingerprint) is stored in `localStorage["lace-passkey-wallet-v1"]`. Wallet state is in memory and never rehydrated before binding verification. A different passkey or fingerprint cannot open a saved wallet. If storage is cleared, explicitly choose **Open passkey wallet** to discover a synced passkey and restore its public binding. Without a saved binding, the app cannot compare against the previous wallet until its address is shown; check it against a previously recorded address. An invalid binding fails closed.
+2. Set these values in `.env`:
+   - `VITE_BLOCKFROST_PROJECT_ID_PREPROD`: a Blockfrost Preprod project ID, for live Preprod data.
+   - `SPONSOR_API_KEY`: the Lace testing key that the sponsor operator shared. Keep the name exactly `SPONSOR_API_KEY`. Vite inlines every `VITE_` variable into the browser bundle, so the server refuses to start with a `VITE_` sponsor key.
+   - `SPONSOR_URL` is optional. It defaults to `https://sponsor-preprod.lw.iog.io`.
 
-After funding the displayed address with **Preprod test ADA**, wait for UTXOs, then build, inspect the transaction review (recipient, amount, change, input count, fee, CBOR), check the review box, and sign. Each signature needs a fresh passkey assertion. Submit is a separate action. `Buffer` remains global until browser signing proves removal safe.
+   A variable set in the server's process environment overrides `.env`.
 
-## Browser checkpoint
+3. Run the checks and start the dev server on port 5173:
 
-1. Create in a PRF-capable browser at `http://localhost:5173/`. Record OS, browser, provider, both prompts, and Preprod address.
-2. Reload, open with the same passkey, and compare the address. Clear browser storage **after recording the public address**; choose **Open** without restoring storage. Compare the address and new public binding. Wallet entity itself must not be rehydrated.
-3. On another machine at `http://localhost`, choose **Open** with the synced passkey and compare the address. If you copy a public binding instead, the SDK also pins the credential ID and verifies the fingerprint before opening.
-4. Try a different passkey. Confirm refusal before balances or signing. The imported credential ID pins `allowCredentials` on reload, so a different credential may fail in the browser picker before SDK fingerprint comparison.
-5. Fund from the Preprod faucet if desired, build, review, and sign. Confirm a fresh passkey prompt. Submit only if you intend to send a transaction. Record hash and explorer confirmation separately. No browser run on a real passkey provider or second physical machine is implied by automated tests.
+   ```bash
+   npm run typecheck
+   npm test
+   npm run build
+   npm run dev -- --host localhost --port 5173 --strictPort
+   ```
 
-The Playwright suite uses a Chrome DevTools Protocol virtual authenticator and local Blockfrost fixtures. It checks PRF results, binding, and signing without submitting a transaction. Run `npm run test:e2e` after `NODE_OPTIONS=--dns-result-order=ipv4first npx playwright install chromium`. The suite starts on port 5198 by default; set `E2E_PORT` to a free port if needed.
+4. Open `http://localhost:5173/`. Keep this exact origin: the preview signer serves custody requests only for the origins its build lists, which are `http://localhost:5173` and `https://midnight.city`. Allow the signer popup.
 
-SDK `34eb91daf` initializes the headless wallet, discovers its first address, and syncs fixture UTXOs. The consumer limits the in-memory entity to Preprod: SDK excludes mainnet but can still include Preview. Playwright verifies create/reload/storage-clear recovery, second-credential mismatch, and two real SDK transaction signatures with one fresh WebAuthn PRF assertion per signature. Tests mock Blockfrost responses but neither PRF nor the signatures. No transaction is submitted in CI. These virtual-authenticator results do not prove real synced passkeys, a second physical machine, or a confirmed Preprod transaction. Previous manual testing used an older SDK tarball and must not be treated as evidence for this one.
+The **Fee sponsor** line shows what the relay's `GET /sponsor/health` answered: the sponsor's network and its free fee UTxOs. That route needs no key on the sponsor side. A wrong key shows up at the first sponsored request as an `unauthorized` refusal in the custody log.
+
+## Fee sponsor relay
+
+The hosted sponsor sends no CORS headers, and its client key is a bearer secret. So the browser never calls it directly and never holds the key:
+
+- The page creates the sponsor client with ``createCardanoCustodySponsorClient({ baseUrl: `${location.origin}/sponsor` })`` and no `apiKey`.
+- `vite.config.ts` loads the relay plugin from `sponsor-relay.ts`, which sets `server.proxy` and `preview.proxy` for `/sponsor`. The plugin reads `SPONSOR_URL` and `SPONSOR_API_KEY` in the Node process from the same `.env` files as Vite, with the process environment over them. It reads them itself, not through Vite's `loadEnv`, so `vite --debug` does not print the key.
+- The relay forwards only the sponsor's client API: `GET /health`, `POST /v1/leases`, `DELETE /v1/leases/:id`, `POST /v1/leases/:id/witness`, `GET /v1/collateral` and `POST /v1/collateral/witness`. It parses the path once and forwards the path it checked. It answers any other path, a path that names another host such as `//admin/health` included, with `404 not_found` itself.
+- It forwards only requests from pages of its own origin. A request whose `Sec-Fetch-Site` is not `same-origin` (or `none`, for an address typed into the browser), or whose `Origin` is another origin, gets `403 cross_site_request`. A body that is not JSON gets `415 unsupported_media_type`, so another origin cannot send one without a CORS preflight.
+- It strips the `/sponsor` prefix and drops the browser's `authorization`, `proxy-authorization` and `cookie` headers. It sends `authorization: Bearer <SPONSOR_API_KEY>` as the only credential. The sponsor's status and body come back unchanged, without `set-cookie`.
+- Without a key, the relay forwards nothing. It answers `503 relay_not_configured`, which the custody log shows.
+
+Any program that can reach the dev server, unlike a web page of another origin, can spend the key's quotas through the relay. Keep the server on `localhost`.
+
+The key sits in `.env` inside the Vite root, so the dev server must refuse to serve env files. `package.json` requires Vite 8.3.3 or later: older Vite 8 releases serve `.env` through query URLs such as `/.env?raw`. A relay unit test checks that the dev server answers 403 for these URLs. Git ignores `.env` and every `.env.*` file except `.env.example`.
+
+A `vite build` output is static files and has no relay. A deployed app needs its own backend relay that does the same, behind the app's own authentication.
+
+## Funding
+
+- **Passkey wallet**: Preprod test ADA from the faucet. It pays the deposits to the custody account and its own transfer fees.
+- **Account creation**: the hosted sponsor pays the fee, the 2 ADA stake deposit and the control output. The account needs no funds to be created.
+- **Later account transactions**: the sponsor lends only its collateral. The account pays every fee itself, from its deposits first. A revocation, a device change or a sweep falls back to the owner fee reserve in the control output, so it needs no deposit.
+- **Owner operations**: an owner spend pays out of deposits. Issuing a grant locks lovelace in the grant's own UTxO and tops the owner fee reserve up to 2.1 ADA, both from deposits.
+- **Grant spends**: an agent's spend pays its outputs and its fee from deposits, and the fee counts against the grant's caps. The SDK estimates about 1.8 ADA of deposits beyond the outputs.
+
+A 20 ADA deposit covers the demo grant (4 ADA per spend, 6 ADA in total) and a 2 ADA agent spend.
+
+## What a live Preprod run also needs
+
+- The logic's reward account (`stake_test17qkddr3e300el0ydy4mpfd2yqdz3aeez2g8v0p07znud7ksul9rpg`) must be registered and hold no balance. While it holds a balance, every account transaction fails with `CardanoCustodyLogicRewardBalanceError`, which the custody log explains.
+- The Blockfrost provider must report `registered` for reward accounts. Otherwise every build fails with `CardanoCustodyLogicNotRegisteredError`.
+
+The custody log turns the SDK's typed errors, the sponsor's refusals and the relay's refusals into one line each, with what to do about them. A line starts with the error's class name and its `code` in brackets, such as `CardanoCustodyLogicRewardBalanceError [custody-logic-reward-balance]:`. A production build may shorten the class name, but it keeps the code.
