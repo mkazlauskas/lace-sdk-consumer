@@ -11,7 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@input-output-hk/lace-sdk": "file:vendor/input-output-hk-lace-sdk-0.1.0-fe9d709f7.tgz",
+    "@input-output-hk/lace-sdk": "0.1.0-dev.12",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "buffer": "^6.0.3",
