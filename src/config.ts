@@ -4,16 +4,15 @@ import {
   FEATURE_FLAG_NETWORK_TYPE,
   Milliseconds,
   AppConfig,
-} from "@input-output-hk/lace-sdk";
+} from "@input-output-hk/lace-sdk/cardano";
 
 // --- Config (mirrors apps/lace-extension/src/util/config.ts) ---
 
-const BLOCKFROST_PROJECT_ID_PREPROD = import.meta.env
+export const BLOCKFROST_PROJECT_ID_PREPROD = import.meta.env
   .VITE_BLOCKFROST_PROJECT_ID_PREPROD;
-const BLOCKFROST_PROJECT_ID_PREVIEW = import.meta.env
-  .VITE_BLOCKFROST_PROJECT_ID_PREVIEW;
-const BLOCKFROST_PROJECT_ID_MAINNET = import.meta.env
-  .VITE_BLOCKFROST_PROJECT_ID_MAINNET;
+export const BLOCKFROST_URL_PREPROD =
+  import.meta.env.VITE_BLOCKFROST_URL_PREPROD || "https://cardano-preprod.blockfrost.io";
+const TIP_POLL_MS = Number(import.meta.env.VITE_TIP_POLL_MS) || 30000;
 
 const rateLimiterConfig = {
   size: 500,
@@ -31,31 +30,14 @@ export const config: Partial<AppConfig> = {
   extraFeatureFlags: [],
   defaultTestnetChainId: Cardano.ChainIds.Preprod,
   cardanoProvider: {
-    tipPollFrequency: Milliseconds(30000),
-    transactionHistoryPollingIntervalSeconds: Milliseconds(30000),
+    tipPollFrequency: Milliseconds(TIP_POLL_MS),
     blockfrostConfigs: {
       // keyed by 'network magic'
       1: {
         clientConfig: {
-          baseUrl: "https://cardano-preprod.blockfrost.io",
+          baseUrl: BLOCKFROST_URL_PREPROD,
           apiVersion: "v0",
           projectId: BLOCKFROST_PROJECT_ID_PREPROD,
-        },
-        rateLimiterConfig,
-      },
-      2: {
-        clientConfig: {
-          baseUrl: "https://cardano-preview.blockfrost.io",
-          apiVersion: "v0",
-          projectId: BLOCKFROST_PROJECT_ID_PREVIEW,
-        },
-        rateLimiterConfig,
-      },
-      764824073: {
-        clientConfig: {
-          baseUrl: "https://cardano-mainnet.blockfrost.io",
-          apiVersion: "v0",
-          projectId: BLOCKFROST_PROJECT_ID_MAINNET,
         },
         rateLimiterConfig,
       },
@@ -64,7 +46,5 @@ export const config: Partial<AppConfig> = {
   cexplorerUrls: {
     // keyed by 'network magic'
     1: "https://preprod.cexplorer.io",
-    2: "https://preview.cexplorer.io",
-    764824073: "https://cexplorer.io",
   },
 };

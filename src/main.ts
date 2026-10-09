@@ -1,19 +1,31 @@
 import {
   createLaceWallet,
-  createInMemoryWalletEntity,
   createTxBuilder,
   signCardanoTx,
   submitCardanoTx,
   waitForNetworkInfo,
-  Mnemonic,
   Cardano,
-  ByteArray,
   HexBytes,
   m,
-} from "@input-output-hk/lace-sdk";
+  createRemotePasskeyWalletEntity,
+  type AccountId,
+} from "@input-output-hk/lace-sdk/cardano";
 import { config, featureFlags } from "./config";
 import { ui } from "./ui";
-import { login } from "./web3auth";
+import { bindingKey, readBinding } from "./binding";
+import { signer, signerUrl, withSigner } from "./signer";
+import { parseAdaAmount, selectAccountAddress, selectAccountUtxos } from "./accounts";
+import { startCustody } from "./custody/custody-app";
+import { formatAda } from "./custody/custody-view";
+
+let savedBinding: ReturnType<typeof readBinding>;
+try {
+  savedBinding = readBinding(localStorage, signerUrl);
+} catch (error) {
+  ui.setStatus(String(error));
+  throw error;
+}
+let networkReady = false;
 
 // --- Create headless wallet ---
 ui.setStatus("Creating wallet...");
@@ -25,73 +37,112 @@ const wallet = await createLaceWallet({
     m.blockchainCardano,
     m.cardanoProviderBlockfrost,
     m.cryptoCardanoSdk,
+    signer.cardanoVaultModule,
   ] as const,
   environment: "development",
   featureFlags,
   config,
 });
 
-ui.setStatus("Lace initialized");
+// The wallet holds the passkey account and, once created or opened, a
+// custody account. Every read below selects the passkey account by id.
+let ordinaryAccountId: AccountId | undefined;
+
+function addPreprodWallet(entity: Awaited<ReturnType<typeof createRemotePasskeyWalletEntity>>["entity"]) {
+  // SDK excludes mainnet, but can still include Preview. Restrict the
+  // in-memory wallet to configured Preprod before selecting an active account.
+  const accounts = entity.accounts.filter((account) => account.blockchainName === "Cardano" && account.blockchainNetworkId === "cardano-1");
+  if (accounts.length !== 1) throw new Error("Expected exactly one Cardano Preprod account");
+  wallet.dispatch("wallets.addWallet", { ...entity, accounts });
+  return accounts[0].accountId;
+}
+
+ui.setStatus(`Lace initialized. Signer: ${new URL(signerUrl).origin}`);
+ui.setWalletMode(savedBinding === null);
 ui.showStateOutput();
 setInterval(() => {
   ui.updateState(wallet.getState());
 }, 200);
 
-// --- Subscribe to addresses ---
-wallet.stateObservables.addresses.selectAllAddresses$.subscribe((addresses) => {
-  const first = addresses[0];
-  ui.updateAddress(first ? first.address : null);
-});
-
-// --- Subscribe to tokens ---
-wallet.stateObservables.tokens.selectAllTokens$.subscribe((tokens) => {
-  ui.updateTokens(
-    tokens.length > 0
-      ? { count: tokens.length, json: JSON.stringify(tokens, null, 2) }
-      : null
-  );
-});
-
-// --- Build Transaction ---
+// --- Passkey account address, UTxOs and tokens ---
 const RECIPIENT = Cardano.PaymentAddress(
   "addr_test1qzkwnu5y0djlptw3t38v6njkzaaq6mdnn7r97zkxhu2ypy6e8l75l0avdum8zp0cycd9785nhjtmntmj22l934ptjehqm3kj5s"
 );
+ui.setRecipient(RECIPIENT);
 
-// Track the latest address and UTXOs reactively
+let allAddresses: Parameters<typeof selectAccountAddress>[0] = [];
+let utxosByAccount: Partial<Record<string, Cardano.Utxo[]>> = {};
 let latestAddress: Cardano.PaymentAddress | undefined;
 let latestUtxos: Cardano.Utxo[] = [];
 
+function refreshOrdinaryAccount() {
+  const address = selectAccountAddress(allAddresses, ordinaryAccountId);
+  latestAddress = address ? Cardano.PaymentAddress(address) : undefined;
+  latestUtxos = selectAccountUtxos(utxosByAccount, ordinaryAccountId);
+  ui.updateAddress(latestAddress ?? null);
+  ui.updateBalance(
+    ordinaryAccountId
+      ? { lovelace: latestUtxos.reduce((total, [, output]) => total + BigInt(output.value.coins), 0n), utxoCount: latestUtxos.length }
+      : null,
+  );
+}
+
 wallet.stateObservables.addresses.selectAllAddresses$.subscribe((addresses) => {
-  const first = addresses[0];
-  latestAddress = first ? Cardano.PaymentAddress(first.address) : undefined;
+  allAddresses = addresses;
+  refreshOrdinaryAccount();
 });
 
-wallet.stateObservables.cardanoContext.selectAvailableAccountUtxos$.subscribe(
-  (utxosByAccount) => {
-    latestUtxos = Object.values(utxosByAccount).flat();
-  }
-);
+wallet.stateObservables.cardanoContext.selectAvailableAccountUtxos$.subscribe((utxos) => {
+  utxosByAccount = utxos;
+  refreshOrdinaryAccount();
+});
 
+wallet.stateObservables.tokens.selectTokensGroupedByAccount$.subscribe((tokensByAccount) => {
+  const tokens = ordinaryAccountId ? tokensByAccount[ordinaryAccountId] : undefined;
+  const all = tokens ? [...tokens.fungible, ...tokens.nfts] : [];
+  ui.updateTokens(all.length > 0 ? { count: all.length, json: JSON.stringify(all, null, 2) } : null);
+});
+
+// --- Build, sign and submit an ordinary transfer ---
 let lastBuiltTxCbor: string | undefined;
 let lastSignedTxCbor: string | undefined;
 
-ui.onBuildTxClick(() => {
+ui.onBuildTxClick(async () => {
+  if (!ordinaryAccountId) throw new Error("Open the saved passkey wallet first");
   const builder = createTxBuilder(wallet).unwrap();
 
   if (!latestAddress) {
     ui.appendStatus("\n\nNo address available — log in first");
     return;
   }
+  const recipient = Cardano.PaymentAddress(ui.recipient());
+  const coins = parseAdaAmount(ui.amount());
 
   const tx = builder
     .setChangeAddress(latestAddress)
     .setUnspentOutputs(latestUtxos)
-    .transferValue(RECIPIENT, { coins: 1_230_000n })
+    .transferValue(recipient, { coins })
     .expiresIn(900)
     .build();
 
-  lastBuiltTxCbor = tx.toCbor();
-  ui.updateTxOutput(lastBuiltTxCbor);
+  const builtTx = await tx;
+  lastBuiltTxCbor = builtTx.toCbor();
+  lastSignedTxCbor = undefined;
+  ui.updateTxOutput(builtTx.toCbor());
+  const body = builtTx.body().toCore();
+  // The review shows what the built transaction pays the recipient, not the
+  // amount field, which the user may have edited while the build ran.
+  const paid = body.outputs
+    .filter((output: { address: string }) => output.address === recipient)
+    .reduce((total: bigint, output: { value: { coins: bigint } }) => total + BigInt(output.value.coins), 0n);
+  ui.showTxReview({
+    recipient,
+    amount: formatAda(paid),
+    changeAddress: latestAddress,
+    inputCount: body.inputs.length,
+    fee: `${Number(body.fee) / 1_000_000} ADA`,
+    note: recipient === custody.address() ? "The recipient is this app's Cardano custody account: a deposit." : undefined,
+  });
   ui.enableSignTx();
 });
 
@@ -100,12 +151,14 @@ ui.onSignTxClick(async () => {
     ui.appendStatus("\n\nNo transaction to sign — build one first");
     return;
   }
+  if (!ordinaryAccountId || !ui.isTxReviewed()) throw new Error("Review the transaction before signing");
 
   ui.appendStatus("\n\nSigning transaction...");
-  const result = await signCardanoTx(wallet, {
-    serializedTx: HexBytes(lastBuiltTxCbor),
-    password: ByteArray.fromUTF8("password"),
-  });
+  lastSignedTxCbor = undefined;
+  ui.disableSubmitTx();
+  const serializedTx = HexBytes(lastBuiltTxCbor);
+  const accountId = ordinaryAccountId;
+  const result = await withSigner(() => signCardanoTx(wallet, { serializedTx, accountId }));
 
   if (result.isOk()) {
     lastSignedTxCbor = result.value.serializedTx;
@@ -136,26 +189,29 @@ ui.onSubmitTxClick(async () => {
 });
 
 // Enable button once network info is ready
-waitForNetworkInfo(wallet).then(() => ui.enableBuildTx());
+waitForNetworkInfo(wallet).then(() => {
+  networkReady = true;
+  if (ordinaryAccountId) ui.enableBuildTx();
+}).catch((error) => ui.appendStatus(`\nNetwork info failed: ${error}`));
 
-// --- Web3Auth login ---
-ui.onLoginClick(async () => {
-  const { entropyHex, userId } = await login();
-  const mnemonicWords = Mnemonic.deriveFrom(entropyHex);
-  ui.appendStatus(
-    `\n\nLogin OK: userId="${userId}", ${mnemonicWords.length} words`
-  );
+async function openWallet(create: boolean): Promise<void> {
+  if (ordinaryAccountId) throw new Error("Wallet is already open");
+  const binding = readBinding(localStorage, signerUrl);
+  if (create && binding) throw new Error("A wallet is already bound here. Open it instead.");
+  const { entity, publicKey } = await withSigner(() => createRemotePasskeyWalletEntity({
+    signer,
+    walletName: "Passkey Preprod",
+    expectedPublicKey: binding ?? undefined,
+  }));
+  if (!binding) localStorage.setItem(bindingKey(signerUrl), JSON.stringify(publicKey));
+  ordinaryAccountId = addPreprodWallet(entity);
+  refreshOrdinaryAccount();
+  ui.setWalletMode(false);
+  if (networkReady) ui.enableBuildTx();
+  ui.appendStatus(`\nPasskey wallet ${create ? "created/connected" : "opened"}. walletId=${entity.walletId}`);
+}
 
-  // Create an in-memory wallet entity from the mnemonic
-  ui.appendStatus("\n\nCreating wallet entity...");
-  const password = ByteArray.fromUTF8("password");
-  const walletEntity = await createInMemoryWalletEntity(wallet, {
-    mnemonicWords: [...mnemonicWords],
-    password,
-    walletName: `Web3Auth ${userId}`,
-  });
+ui.onCreateClick(() => openWallet(true));
+ui.onOpenClick(() => openWallet(false));
 
-  // Dispatch it into the store
-  wallet.dispatch("wallets.addWallet", walletEntity);
-  ui.appendStatus(`\nWallet added! walletId=${walletEntity.walletId}`);
-});
+const custody = startCustody({ wallet, onCustodyAddress: (address) => ui.enableCustodyRecipient(address) });
