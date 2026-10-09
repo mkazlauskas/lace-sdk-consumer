@@ -11,15 +11,19 @@ Testnet-only Cardano Preprod demo of `@input-output-hk/lace-sdk/cardano`. It has
 
 ## SDK package
 
-The SDK is vendored as `vendor/input-output-hk-lace-sdk-0.1.0-fe9d709f7.tgz`, an `npm pack` of lace-platform PR #2825 at commit `fe9d709f71dcb1d9f134c095568850c55450a5c0`. Its tree is the same as the published `0.1.0-dev.11`. SHA-256: `24acbaaa934613f7b27abb3c116281660dd622f912868aa6c4af1e4de8b9b9e9`. Type checks, unit tests, the production build and the browser suite pass with this package.
+The SDK is `@input-output-hk/lace-sdk@0.1.0-dev.12` from GitHub Packages. It was published from lace-platform `main` at `578670dc1941bee98e5b6814fe23b056a6e5fe70`, the merge of PR #2825. `package-lock.json` pins its integrity (`sha512-rqLHZ+DH/oXGpgiUhA51F4jsgCATp+4OBckY5yH4de5BQDTbwINtbsGGbtp3cqYMkYNUB+JiH6iqceQgzoS2Dw==`). Installing it needs read access to GitHub Packages:
+
+- an `.npmrc`, yours or the project's (which git ignores), with `@input-output-hk:registry=https://npm.pkg.github.com`;
+- a token that has `read:packages`.
+
+Type checks, unit tests, the production build and the browser suite pass with this package.
 
 ## Start
 
-1. Install and check the package:
+1. Install:
 
    ```bash
    cd /home/mkazlauskas/Code/iog/lace-sdk-consumer
-   sha256sum vendor/input-output-hk-lace-sdk-0.1.0-fe9d709f7.tgz
    npm ci
    test -e .env || cp .env.example .env
    ```
