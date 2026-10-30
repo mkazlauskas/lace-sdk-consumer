@@ -5,13 +5,14 @@ import { liveProver, preflightLocalProver } from './prover-config';
 import { readPublicSync } from './public-sync';
 import { indexedTransactions, nodeBlockNumber, nodePendingExtrinsics, waitForBlocks } from './local-chain';
 import { observeSharedWorkers, type SharedWorkerObserver } from './worker-cdp';
+import { freedAfterReset, heldByBuild, lastSuccessfulSync, nothingReserved, resetSeen, syncedSince, watchForReset, type ReservationBalances } from './reservations';
 import type { SubmitBoundary } from '../../src/midnight/operations';
 
 // The SDK's Worker mode in the reference consumer, in real Chromium. Live execution needs an explicit
 // MIDNIGHT_LIVE (`preview` or `undeployed`, the local chain) and a disposable MIDNIGHT_TEST_WALLET_FILE,
 // whose words and password reach the page once and are never printed. On Preview only the transfer runs, and
-// it sends one smallest NIGHT unit to the wallet's own address. Every other scenario needs the local
-// chain. Attachments carry public values only: hashes, counts, fixed labels and timings.
+// it sends one smallest NIGHT unit to the wallet's own address; with MIDNIGHT_LIVE_RESET=1, the reset check runs there
+// too. Every other scenario needs the local chain. Attachments carry public values only: hashes, counts, fixed labels and timings.
 
 const network = liveNetwork(process.env.MIDNIGHT_LIVE);
 const enabled = !!network && !!process.env.MIDNIGHT_TEST_WALLET_FILE;
@@ -22,7 +23,7 @@ const INDEXER_SOCKET = /\/api\/v\d+\/graphql\/ws$/;
 // The one call in the worker's engine that broadcasts a proved transaction (the wallet SDK's facade).
 const BROADCAST_ANCHOR = /submissionService\.submitTransaction\(/;
 
-type Balances = PublicBalances & { synced: { unshielded: boolean; shielded: boolean; dust: boolean } };
+type Balances = PublicBalances & ReservationBalances & { synced: { unshielded: boolean; shielded: boolean; dust: boolean } };
 type SubmissionRecord = { stage?: string; activityHash?: string; txId?: string; historyType?: string; sdk?: string; errorCode?: string };
 
 async function loadWallet(): Promise<TestWallet> {
@@ -281,6 +282,45 @@ test.describe('Worker mode, live', () => {
       };
     } finally {
       await attach(testInfo, 'worker-sc1', { ...observation, timings, submission: await record(page), status: await statusText(page) });
+    }
+  });
+
+  // lace-platform#2939. Only with MIDNIGHT_LIVE_RESET=1, after the transfers have confirmed, so that no other transaction
+  // holds coins. Nothing is signed, proved or submitted, but the proof server is checked as for every scenario.
+  test('reset frees the NIGHT and the DUST fee that a built transfer reserved', async ({ page }, testInfo) => {
+    test.skip(process.env.MIDNIGHT_LIVE_RESET !== '1', 'Requires MIDNIGHT_LIVE_RESET=1.');
+    requireLocalProver();
+    await preflightLocalProver();
+    const wallet = await loadWallet();
+    const seen: Partial<Record<'before' | 'built' | 'afterReset', ReservationBalances>> = {};
+    // Each wait records the last state it read, so the attachment shows the values it compared.
+    const read = async (name: keyof typeof seen) => { const state = await balances(page); seen[name] = { night: state.night, dust: state.dust }; return state; };
+    try {
+      await restore(page, wallet);
+      await waitForSynced(page, wallet, 2_400_000);
+      // Read-only, unlike ensureSpendable: this check never registers, on any chain.
+      await waitForState(page, async () => canSpend(await balances(page), wallet.address, true), 600_000, 'The reset check needs spendable NIGHT and DUST; it never registers.');
+      await waitForState(page, async () => nothingReserved(await read('before')), 120_000, 'Nothing may be reserved before the build: another transaction holds coins.');
+      const availableBefore = BigInt(seen.before!.night.available);
+      await page.locator('#kind').selectOption('unshielded');
+      await page.locator('#outputs').fill(JSON.stringify([{ to: wallet.address, tokenId: (await balances(page)).nightTokenId, amount: '1' }]));
+      await page.locator('#estimate').click();
+      await waitForOperation(page, async () => ((await page.locator('#operation').textContent()) ?? '').includes('unsignedEstimate'), 120_000, 'The fee estimate must return');
+      await page.locator('#build').click();
+      await waitForOperation(page, () => page.locator('#sign').isEnabled(), 120_000, 'The build must return an unsigned transfer');
+      // Left unsigned. The worker sends its state at most every 500 ms, so the reservation shows a little later.
+      await waitForState(page, async () => heldByBuild(await read('built'), availableBefore), 120_000, 'The build must show its reservation; without it this check is invalid.');
+      expect((await history(page)).length, 'The reset signal needs a non-empty history before the reset.').toBeGreaterThan(0);
+      const syncMark = await lastSuccessfulSync(page);
+      await watchForReset(page);
+      await page.locator('#reset').click();
+      await expect(page.locator('#status')).toContainText('Reset requested');
+      await expect.poll(() => resetSeen(page), { timeout: 60_000, message: 'The page must observe the reset' }).toBe(true);
+      await waitForState(page, async () => await syncedSince(page, syncMark) && await isSynced(page, wallet), 2_400_000, 'The reset account must complete a new strict sync.');
+      await waitForState(page, async () => { try { return freedAfterReset(await read('afterReset'), availableBefore); } catch { return false; } }, 120_000,
+        'Once the reset account has synced, the NIGHT and the DUST the build reserved must be free.');
+    } finally {
+      await attach(testInfo, 'worker-reset-reservations', { network: wallet.network, server: testInfo.project.name, ...seen, status: await statusText(page) });
     }
   });
 

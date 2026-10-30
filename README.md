@@ -713,6 +713,28 @@ previously confirmed registration.
 A different disposable wallet needs its own confirmed registration evidence; absence
 is a prerequisite failure, never a fabricated registration or automatic retry.
 
+The reset check (lace-platform#2939) runs only with `MIDNIGHT_LIVE_RESET=1`, in page
+mode and in Worker mode. It requires that nothing is reserved, builds one smallest
+NIGHT unit to the wallet's own address without signing it, and waits until
+`night.available` drops and `dust.available` falls below `dust.balance`. It then
+resets the account's sync and waits for a new strict sync: all three parts synced,
+a later `lastSuccessfulSync` and nothing pending. It then requires the NIGHT
+available before the build, no pending NIGHT, and positive DUST all spendable. It
+never registers, so a wallet without spendable DUST fails its prerequisite. Nothing
+is signed, proved or submitted. Run it after any transfer has confirmed, never beside
+one. It tells that the reset happened from the account's history emptying, so the
+wallet needs at least one history row. Worker mode still checks the local proof
+server's `/version`, and its command runs the check once per server, so twice:
+
+```bash
+unset MIDNIGHT_LIVE_REGISTER MIDNIGHT_LIVE_TRANSFER
+MIDNIGHT_LIVE=preview MIDNIGHT_LIVE_RESET=1 MIDNIGHT_TEST_WALLET_FILE=/private/path/disposable-wallet.json \
+  npm run test:midnight:live -- tests/live/midnight.live.spec.ts --grep 'reset frees'
+MIDNIGHT_LIVE=preview MIDNIGHT_LIVE_RESET=1 MIDNIGHT_LIVE_PROVER=local \
+  MIDNIGHT_TEST_WALLET_FILE=/private/path/disposable-wallet.json \
+  npx playwright test --config playwright.midnight-worker-live.config.ts --grep 'reset frees'
+```
+
 ### Worker mode, live
 
 `playwright.midnight-worker-live.config.ts` (`npm run test:midnight:worker:live`)

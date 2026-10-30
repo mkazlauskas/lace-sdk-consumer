@@ -5,6 +5,7 @@ import { installStartupDiagnostics } from './startup-diagnostics';
 import { observeProvingRelay, readPublicProvingState, waitForProving } from './proving-diagnostics';
 import { liveProver, preflightLocalProver } from './prover-config';
 import { readPublicSync } from './public-sync';
+import { freedAfterReset, heldByBuild, lastSuccessfulSync, nothingReserved, resetSeen, syncedSince, watchForReset, type ReservationBalances } from './reservations';
 
 // Live execution requires explicit authorization; wallet input stays private.
 const enabled = process.env.MIDNIGHT_LIVE === 'preview' && !!process.env.MIDNIGHT_TEST_WALLET_FILE;
@@ -92,7 +93,7 @@ async function restore(page: Page, wallet: TestWallet, verifySuppliedAddress = t
     try { const address = (await balances(page)).address.unshielded; return verifySuppliedAddress ? address === wallet.address : address.startsWith('mn_addr_preview'); } catch { return false; }
   }, 240_000, 'Derived Preview address must match the supplied public address before any signing.');
 }
-async function balances(page: Page): Promise<PublicBalances> {
+async function balances(page: Page): Promise<PublicBalances & ReservationBalances & { synced: { shielded: boolean } }> {
   return JSON.parse((await page.locator('#balances').textContent())!);
 }
 async function approve(page: Page) {
@@ -244,4 +245,40 @@ test('nonzero account restoration is deterministic without spending', async ({ p
   expect((await balances(second)).address.unshielded).toBe(address);
   expect(await second.locator('#keys').textContent()).toBe(keys);
   await page.locator('#disconnect').click(); await second.locator('#disconnect').click();
+});
+
+// lace-platform#2939. Only with MIDNIGHT_LIVE_RESET=1, after any transaction run has confirmed, so that no other
+// transaction holds coins. Nothing is signed, proved or submitted.
+test('reset frees the NIGHT and the DUST fee that a built transfer reserved', async ({ page }, testInfo) => {
+  test.skip(process.env.MIDNIGHT_LIVE_RESET !== '1', 'Requires MIDNIGHT_LIVE_RESET=1.');
+  if (process.env.MIDNIGHT_LIVE_REGISTER || process.env.MIDNIGHT_LIVE_TRANSFER) throw new Error('The reset check requires transaction opt-ins unset.');
+  const wallet = await loadWallet();
+  const seen: Partial<Record<'before' | 'built' | 'afterReset', ReservationBalances>> = {};
+  // Each wait records the last state it read, so the attachment shows the values it compared.
+  const read = async (name: keyof typeof seen) => { const state = await balances(page); seen[name] = { night: state.night, dust: state.dust }; return state; };
+  const strictlySynced = async () => { try { const { synced } = await balances(page); return synced.unshielded && synced.shielded && synced.dust; } catch { return false; } };
+  await restore(page, wallet);
+  try {
+    await waitForState(page, async () => await strictlySynced() && canSpend(await balances(page), wallet.address, true), 600_000, 'The reset check requires a strict sync, actual NIGHT and matured spendable DUST.');
+    await waitForState(page, async () => nothingReserved(await read('before')), 120_000, 'Nothing may be reserved before the build: another transaction holds coins.');
+    const availableBefore = BigInt(seen.before!.night.available);
+    await page.locator('#kind').selectOption('unshielded');
+    await page.locator('#outputs').fill(JSON.stringify([{ to: wallet.address, tokenId: (await balances(page)).nightTokenId, amount: '1' }]));
+    await page.locator('#estimate').click(); await expect(page.locator('#operation')).toContainText('unsignedEstimate', { timeout: 120_000 });
+    await page.locator('#build').click(); await expect(page.locator('#sign')).toBeEnabled({ timeout: 120_000 });
+    // Left unsigned: the engine's reservation is what the reset must free.
+    await waitForState(page, async () => heldByBuild(await read('built'), availableBefore), 120_000, 'The build must show its reservation; without it this check is invalid.');
+    expect(JSON.parse((await page.locator('#history').textContent())!).length, 'The reset signal needs a non-empty history before the reset.').toBeGreaterThan(0);
+    const syncMark = await lastSuccessfulSync(page);
+    await watchForReset(page);
+    await page.locator('#reset').click();
+    await expect(page.locator('#status')).toContainText('Reset requested');
+    await expect.poll(() => resetSeen(page), { timeout: 60_000, message: 'The page must observe the reset.' }).toBe(true);
+    await waitForState(page, async () => await syncedSince(page, syncMark) && await strictlySynced(), 600_000, 'The reset account must complete a new strict sync.');
+    await waitForState(page, async () => { try { return freedAfterReset(await read('afterReset'), availableBefore); } catch { return false; } }, 120_000,
+      'Once the reset account has synced, the NIGHT and the DUST the build reserved must be free.');
+  } finally {
+    await testInfo.attach('preview-reset-reservations', { body: JSON.stringify(seen, null, 2), contentType: 'application/json' });
+    await page.locator('#disconnect').click();
+  }
 });
