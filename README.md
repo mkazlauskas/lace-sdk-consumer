@@ -15,11 +15,14 @@ The superseded SDK was vendored as `vendor/input-output-hk-lace-sdk-0.1.0-fe9d70
 
 ## Start
 
-1. Install and check the package:
+1. Install and check the packages. `npm ci` installs `@laceio/sdk` and `@laceio/cardano`
+   from npm at the versions the lockfile pins. The Temenos verifier comes from
+   `vendor/`, and `npm ci` fails until you place it there; getting it needs access
+   to a private package (see [Packaged dependencies](#packaged-dependencies)):
 
    ```bash
    cd lace-sdk-consumer
-   shasum -a 256 vendor/laceio-sdk-0.0.0-development.tgz vendor/laceio-cardano-0.0.0-development.tgz vendor/input-output-hk-temenos-attestation-verifier-0.3.0.tgz
+   shasum -a 256 vendor/input-output-hk-temenos-attestation-verifier-0.3.0.tgz
    npm ci
    test -e .env || cp .env.example .env
    ```
@@ -195,18 +198,33 @@ Worker mode the page looks the material up and the worker calls the proof server
 
 ### Packaged dependencies
 
-The three archives below are private build artifacts and are not committed. Before
-running `npm ci`, obtain them through the approved private build/package source
-and place them at these paths:
+`@laceio/sdk` and `@laceio/cardano` install from npm at exact versions, and the
+lockfile pins them by integrity. The Temenos verifier is published only to GitHub
+Packages, with restricted access, so it stays a private archive that is not
+committed. Before running `npm ci`, obtain it through the approved private
+build/package source and place it at
+`vendor/input-output-hk-temenos-attestation-verifier-0.3.0.tgz`. Keep it local;
+`.gitignore` excludes it. Without it, `npm ci` stops with `ENOENT` and installs
+nothing. Its pinned hash below identifies the artifact used for the recorded checks;
+it is byte-identical to version 0.3.0 on GitHub Packages.
 
-- `vendor/laceio-sdk-0.0.0-development.tgz`
-- `vendor/laceio-cardano-0.0.0-development.tgz`
-- `vendor/input-output-hk-temenos-attestation-verifier-0.3.0.tgz`
+The installed SDK is `@laceio/sdk@0.1.2-canary.3` from npm, published from
+lace-platform `main` at `76c56fc75780cfec4f95b6df11781278ffe2bb96`, the merge of
+PR #3064, which contains the merge of PR #3021 (`86fe745abc`).
+`@laceio/cardano@0.1.2-canary.0`, the version that SDK depends on, comes from the
+same commit. The installed packages match the npm tarballs file for file.
 
-Keep these files local; `.gitignore` excludes them. Their pinned hashes below
-identify the artifacts used for the recorded checks.
+Before it, the consumer was checked with local builds from `vendor/`. The last was a build
+of `main` at `26afd3d2ea646c8a65b61d8509aa210b6becf280`, the commit tagged
+`@laceio/sdk@0.1.2-canary.5`, which never reached npm (SDK SHA-256
+`7ae2349635aafa78967f8d05dd22b4373f196712c3f0d9136fb761f88c6c68bc`,
+`@laceio/cardano` SHA-256
+`9a0e931e80ee6848d0eca07a05e21361794986b6ce3c2acb1e59a58968eb1b98`). Apart from
+chunk names, the canary's SDK differs from it only in Cardano token metadata
+(schema version 2, which records the metadata's sources; LW-15517) and in new
+translation strings, and its `@laceio/cardano` only in its version.
 
-The installed SDK is the canary build of lace-platform branch
+The build before that was the canary build of lace-platform branch
 `feat/sdk-midnight-worker` (#2865, PR #3021) at
 `68e9ff5aaa5b580c95c0a01219ee2a95864e77e9`: the Worker-mode work in two commits
 (`b498c96f1c`, the feature, and `68e9ff5aaa`, its documentation), on
@@ -228,7 +246,7 @@ build of `fc48f479d2` had added, since the build of
 `97b206f67b98afeb6a37944deec15e8fa84f7982`, that the end of a worker shows as a
 failed sync for each account it ran. The build after those five (a local build,
 SDK SHA-256 `94aa91843e6fb9e64b2b79eca8b11fed74e9b1228cca44af18cffe3af9a693b4`)
-was followed by six more changes, which the installed build has. A client's
+was followed by six more changes, which the build of `68e9ff5aaa` has. A client's
 channel in the worker takes one port at a time, and none until the worker has
 answered the page's handshake; a closed client's id is refused until the host
 has detached it. A call's proving progress reaches only the client that made the
@@ -238,13 +256,16 @@ whose clear fails restarts the engines, counts no reset and fails. A value's
 origin is checked before its bytes are decoded. And the worker's engine load is
 bounded at 60 s, and a lost runtime lock ends the worker like a load failure;
 the notice the worker posts is now `lace-midnight-engine:worker-failed`.
-The installed build was made on 2026-10-29 with `npx nx build lace-sdk` and
+That build was made on 2026-10-29 with `npx nx build lace-sdk` and
 `npx nx build lace-cardano`.
-That runs both channels with all of the SDK's checks. The SDK tarball comes from
+That runs both channels with all of the SDK's checks. The SDK tarball came from
 `node apps/lace-sdk/scripts/pack.mjs --dist dist-canary --development`, and the
-`@laceio/cardano` tarball from `npm pack --ignore-scripts` in `apps/lace-cardano`.
-The installed packages match the tarballs file for file. The previous SDK
-tarballs: the local build before this one, SHA-256
+`@laceio/cardano` tarball from `npm pack --ignore-scripts` in `apps/lace-cardano`;
+the build of `26afd3d2ea` was made the same way. The SDK tarball of the build of
+`68e9ff5aaa` had SHA-256
+`8cec1fc5c640b8002cce85308ffc7616746cf99698cfb4ca3e49ad03186ed980`, and its
+installed packages matched the tarballs file for file. The SDK tarballs before
+it: a local build, SHA-256
 `94aa91843e6fb9e64b2b79eca8b11fed74e9b1228cca44af18cffe3af9a693b4`; before it,
 the build of `fc48f479d2`, SHA-256
 `1848e47eea4e31662a79437b2064f0a716ae5860b1710229fab10762c6297754`; before it,
@@ -258,7 +279,7 @@ the change before it was committed and from the commit, byte-identical); before
 it, the build of `530fa46dfa3d23302ecc308bec2a9247d7e6e6fa` and of
 `19eebf02c6c2c95bc1c3501eceb23af2eb9d1518` (byte-identical), SHA-256
 `8edaefc60f8310b9b72c2095c455d9dd915c96b87b6df951e4997969fa314b1a`. The
-`@laceio/cardano` tarball of this build differs from the previous one, SHA-256
+`@laceio/cardano` tarball of that build differs from the previous one, SHA-256
 `42f1aec40c6b01d86ac77080c0ab31e655ae9f2f7e4df350a39b2aee7a6e811a`, in chunk
 names and in the `//#region` comments that name sources, since `main` moved
 `packages/lib/util/src/common` to `packages/lib/cardano-util/src`; its code and
@@ -270,11 +291,13 @@ before). The earlier `@laceio/cardano` tarball, from `530fa46dfa` to
 `3ce36fb837`, had SHA-256
 `640bd387bad016449cee6a5d368fa37659942b8041aa586b1d665782e8d7699f`.
 
-- `@laceio/sdk@0.0.0-development`, **canary**, `vendor/laceio-sdk-0.0.0-development.tgz`.
-  SHA-256: `8cec1fc5c640b8002cce85308ffc7616746cf99698cfb4ca3e49ad03186ed980`.
-- `@laceio/cardano@0.0.0-development`, the version the SDK depends on,
-  `vendor/laceio-cardano-0.0.0-development.tgz`.
-  SHA-256: `9a0e931e80ee6848d0eca07a05e21361794986b6ce3c2acb1e59a58968eb1b98`.
+- `@laceio/sdk@0.1.2-canary.3`, **canary**, from npm. Integrity
+  `sha512-tL+HVIe6Rf/EpyqVlOq9QvC9iuPP9DNMcL6HTtBHe10A7ufwwJdUMRBrDIW4jL3Tz72bxMLYv9k0eAXOpriNxA==`;
+  tarball SHA-256 `937c6c80f2450c1fc33719bfc1ae9dfd100e6476aa9dcc69401fce984e16a31d`.
+- `@laceio/cardano@0.1.2-canary.0`, the version the SDK depends on, from npm.
+  Integrity
+  `sha512-rwrlPMiGShmdWjisiHfdyi8HpwUzk8ED1MaUXrD/IjdKTsrqLrP2IJNflWE27ACm5JQW7BtCPc3+vGQYB8SFoQ==`;
+  tarball SHA-256 `d872a9e8065a3d1877240ae4a5d9b4589a554ae85a3d4a3a38b391e75bfb4ed3`.
 - The Midnight entry's optional peers, as the SDK's Midnight guide lists them:
   `@midnight-ntwrk/ledger-v8@8.1.0`, `@midnightntwrk/wallet-sdk@1.2.0`,
   `@midnightntwrk/wallet-sdk-abstractions@2.1.0`,
@@ -290,7 +313,7 @@ before). The earlier `@laceio/cardano` tarball, from `530fa46dfa` to
   installs under the verifier, because the SDK declares 0.20 as an optional peer.
   The runtime probe therefore loads that runtime's WebAssembly through
   `@midnight-ntwrk/onchain-runtime-v3`, whose `ContractState` it re-exports.
-- These packages are local and unpublished.
+- The verifier is not on npm; the two SDK packages are.
 
 The Cardano route imports the SDK from `@laceio/sdk/experimental`, the canary
 entry that holds Cardano Shared Custody. Its wallets load
@@ -321,11 +344,11 @@ with the same signer build. Later on 2026-10-26, with the build of
 (`index.html` SHA-256
 `fd82296636ea70e3dd08fea7c894716c63d9bc9e6f15ad3392e63e62412eeaaa`). The rebase
 changed the signer's source, so the `530fa46dfa` signer build no longer matches
-the installed commit. On 2026-10-27, with the build of `fc48f479d2` and after
+`97b206f67b`. On 2026-10-27, with the build of `fc48f479d2` and after
 `rm -rf node_modules && npm ci`, they passed again: `npm test` 153/153, and
 `npm run test:e2e` 26/26 with the same `97b206f67b` signer build, since
 `fc48f479d2` does not change the signer's source. On 2026-10-29, with the
-installed build (`68e9ff5aaa`) and after `rm -rf node_modules && npm ci`, they
+build of `68e9ff5aaa` and after `rm -rf node_modules && npm ci`, they
 passed again: `npm test` 153/153, and `npm run test:e2e` 26/26 with the same
 signer build, since `68e9ff5aaa` does not change the signer's source either.
 Worker mode's validation is under [Worker mode, live](#worker-mode-live).
@@ -807,7 +830,7 @@ while a DevTools session is attached to it, and connects the same page's next
 `new SharedWorker` to that dead worker, so the helper detaches before it closes a
 worker, and the engine-load scenario observes without attaching.
 
-Validation on 2026-10-29 with the installed SDK (`68e9ff5aaa`), after
+Validation on 2026-10-29 with the build of `68e9ff5aaa`, after
 `rm -rf node_modules && npm ci`, with Chromium from Playwright 1.63, the local
 chain of lace-platform `compose/midnight.yml` (node 0.22.5, indexer 4.0.1) and
 proof server 8.1.3:
@@ -847,7 +870,7 @@ proof server 8.1.3:
   returns `MidnightStaleTxError` and removes its Pending row. The Pending-row
   step is bounded, and the wait for finality starts at the post. The worker
   throttles the state view, and the balances and their `synced` flags come from
-  one state. The installed build changed six more things (listed under
+  one state. The build of `68e9ff5aaa` changed six more things (listed under
   [Packaged dependencies](#packaged-dependencies)): the worker's one port at a
   time per client and its handshake gate, the proving progress that reaches only
   the client that made the call, the restart of engines by a reset or a resync

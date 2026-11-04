@@ -15,8 +15,8 @@
   },
   "dependencies": {
     "@input-output-hk/temenos-attestation-verifier": "file:vendor/input-output-hk-temenos-attestation-verifier-0.3.0.tgz",
-    "@laceio/cardano": "file:vendor/laceio-cardano-0.0.0-development.tgz",
-    "@laceio/sdk": "file:vendor/laceio-sdk-0.0.0-development.tgz",
+    "@laceio/cardano": "0.1.2-canary.0",
+    "@laceio/sdk": "0.1.2-canary.3",
     "@midnight-ntwrk/ledger-v8": "8.1.0",
     "@midnightntwrk/wallet-sdk": "1.2.0",
     "@midnightntwrk/wallet-sdk-abstractions": "2.1.0",
