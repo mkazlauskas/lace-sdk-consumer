@@ -102,14 +102,14 @@ test('startup probe observes synthetic breakpoints and emits no raw exception da
   // Keep the optimized file's line layout, but execute ONLY inert fixture code.
   // This tests CDP binding, pause/resume and error projection without a wallet.
   await page.route('**/*', route => ['localhost', '127.0.0.1'].includes(new URL(route.request().url()).hostname) ? route.continue() : route.abort());
-  // The engine's startup anchors sit in the SDK's sdk-init or watch chunk (the
+  // The engine's startup anchors sit in the SDK's page-mode init chunk and the watcher's chunk (the
   // current SDK build has them in watch), and the account watcher's in its watch
   // chunk. Each chunk that holds one is served inert, the startup one first.
   const findBundles = async () => {
-    const names = (await readdir('node_modules/.vite/deps').catch(() => [] as string[])).filter(name => /^(?:sdk-init|watch)-[\w-]+\.js$/.test(name));
+    const names = (await readdir('node_modules/.vite/deps').catch(() => [] as string[])).filter(name => /^[\w@.-]+\.js$/.test(name));
     const entries = await Promise.all(names.map(async name => ({ name, source: await readFile(`node_modules/.vite/deps/${name}`, 'utf8') })));
     const startup = entries.find(entry => entry.source.includes('walletFacade = facade;'));
-    const watch = entries.find(entry => entry.name.startsWith('watch-') && entry.source.includes('Account watch failure:'));
+    const watch = entries.find(entry => entry.source.includes('Account watch failure:'));
     return startup && watch ? [...new Set([startup, watch])] : undefined;
   };
   let bundles = await findBundles();
@@ -125,7 +125,8 @@ test('startup probe observes synthetic breakpoints and emits no raw exception da
   // breakpoint reads `error`, declares it.
   const inert = new Map(bundles.map(({ name, source }) => {
     const body = source.split('\n').map(() => "window.__diagnosticStep = true;");
-    if (name.startsWith('watch-')) body[0] = "const error = new TypeError('private sentinel is not a function');";
+    // The chunk that holds the watcher's breakpoint reads `error`; its name depends on the SDK build.
+    if (source.includes('Account watch failure:')) body[0] = "const error = new TypeError('private sentinel is not a function');";
     return [name, body.join('\n')];
   }));
   await page.route('**/*', route => {

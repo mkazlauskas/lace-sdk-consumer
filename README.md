@@ -196,6 +196,21 @@ key-material lookup then fails and the SDK uses the proof server's built-in
 material, as the guide's "dApp connector primitives" section describes. In
 Worker mode the page looks the material up and the worker calls the proof server.
 
+### What the Midnight page loads
+
+`npx playwright test --config playwright.page-load.config.ts` restores a throwaway wallet
+in each engine mode, offline (every remote origin is refused and the engine is pointed at
+refused loopback ports), against the development server and against `vite build` served by
+`vite preview`. For each run it records what the page itself requested (count, transferred
+bytes, the ledger's WebAssembly), what the SharedWorker requested, and the time to the
+restore form and from restore to the wallet controls, in `playwright-report/page-load/`.
+Page mode must request the ledger's WebAssembly. With `EXPECT_NO_PAGE_WASM=1` the Worker-mode
+run also asserts that the page requested none, which holds from the SDK canary that carries
+lace-platform#3098; before it, the page in Worker mode loaded the ledger as page mode does.
+The Temenos prover loads only for a Temenos session: the verifier library loads the compact
+runtime's and the ledger's WebAssembly when it loads, which would hide what the SDK itself
+puts on the page.
+
 ### Packaged dependencies
 
 `@laceio/sdk` and `@laceio/cardano` install from npm at exact versions, and the

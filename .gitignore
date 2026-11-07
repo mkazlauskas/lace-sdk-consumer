@@ -1,6 +1,7 @@
 node_modules
 dist
 dist-worker-live
+dist-page-load
 .env
 .env.*
 !.env.example
