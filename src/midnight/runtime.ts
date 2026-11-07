@@ -1,7 +1,6 @@
 // Every wallet operation/state read stays on the packaged public Midnight entry.
 import * as sdk from '@laceio/sdk/midnight';
 import { BASELINE_FLAGS, LOCAL_PROOF_SERVER_URL, TEMENOS_URL, validateConfig, workerOption, type SessionConfig } from './config';
-import { createConsumerTemenosProver } from './temenos-provider';
 
 export async function restore(words: string[], password: Uint8Array, requested: SessionConfig) {
   const config = validateConfig(requested);
@@ -22,7 +21,9 @@ export async function restore(words: string[], password: Uint8Array, requested: 
     modules: [sdk.m.featureDev, sdk.m.storageInMemory, sdk.createMidnightModule({
       password, proofServerUrl: LOCAL_PROOF_SERVER_URL, networks: overrides,
       ...(config.prover === 'temenos' ? {
-        createAttestedProver: createConsumerTemenosProver,
+        // The verifier library loads the ledger's and the compact runtime's WebAssembly when it loads, so only a
+        // Temenos session loads it; a page on the local prover, Worker mode included, never does.
+        createAttestedProver: (await import('./temenos-provider')).createConsumerTemenosProver,
       } : {}),
       ...(worker ? { worker } : {}),
     })] as const,

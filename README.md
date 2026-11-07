@@ -208,11 +208,15 @@ build/package source and place it at
 nothing. Its pinned hash below identifies the artifact used for the recorded checks;
 it is byte-identical to version 0.3.0 on GitHub Packages.
 
-The installed SDK is `@laceio/sdk@0.1.2-canary.3` from npm, published from
+The installed SDK is `@laceio/sdk@0.2.0-canary.1` from npm, the canary that renamed
+the Temenos attested prover to Veritee (`createVeriteeAttestedProver`,
+`VeriteeVerifier`), which this app follows. `@laceio/cardano@0.2.0-canary.0`, the
+version that SDK depends on, comes from npm as well.
+
+Before it, the installed SDK was `@laceio/sdk@0.1.2-canary.3` from npm, published from
 lace-platform `main` at `76c56fc75780cfec4f95b6df11781278ffe2bb96`, the merge of
-PR #3064, which contains the merge of PR #3021 (`86fe745abc`).
-`@laceio/cardano@0.1.2-canary.0`, the version that SDK depends on, comes from the
-same commit. The installed packages match the npm tarballs file for file.
+PR #3064, which contains the merge of PR #3021 (`86fe745abc`), with
+`@laceio/cardano@0.1.2-canary.0` from the same commit.
 
 Before it, the consumer was checked with local builds from `vendor/`. The last was a build
 of `main` at `26afd3d2ea646c8a65b61d8509aa210b6becf280`, the commit tagged
@@ -291,13 +295,13 @@ before). The earlier `@laceio/cardano` tarball, from `530fa46dfa` to
 `3ce36fb837`, had SHA-256
 `640bd387bad016449cee6a5d368fa37659942b8041aa586b1d665782e8d7699f`.
 
-- `@laceio/sdk@0.1.2-canary.3`, **canary**, from npm. Integrity
-  `sha512-tL+HVIe6Rf/EpyqVlOq9QvC9iuPP9DNMcL6HTtBHe10A7ufwwJdUMRBrDIW4jL3Tz72bxMLYv9k0eAXOpriNxA==`;
-  tarball SHA-256 `937c6c80f2450c1fc33719bfc1ae9dfd100e6476aa9dcc69401fce984e16a31d`.
-- `@laceio/cardano@0.1.2-canary.0`, the version the SDK depends on, from npm.
+- `@laceio/sdk@0.2.0-canary.1`, **canary**, from npm. Integrity
+  `sha512-K5d/X/+W3ew0Xnnbg8cm+4DtoD+iCFsrz3ylGEHG5y7otB8v80i/vK/BoLlVw6ZyVB1bxaajbYw+APBLR2LDSQ==`;
+  tarball SHA-256 `8f7b3add8f5d8079187c9e2e5580ca30ee3ef73cb1d379a3d8e0e55c7a9b0898`.
+- `@laceio/cardano@0.2.0-canary.0`, the version the SDK depends on, from npm.
   Integrity
-  `sha512-rwrlPMiGShmdWjisiHfdyi8HpwUzk8ED1MaUXrD/IjdKTsrqLrP2IJNflWE27ACm5JQW7BtCPc3+vGQYB8SFoQ==`;
-  tarball SHA-256 `d872a9e8065a3d1877240ae4a5d9b4589a554ae85a3d4a3a38b391e75bfb4ed3`.
+  `sha512-Y0RAXXYN0WzAQI7wmuymFKuUU+WB8d0EBhNvfVkg7QWUIb3Y7uHft3D3Xsi6FJvcIR/WwspTucd9bpuCKvjqlQ==`;
+  tarball SHA-256 `a78371641652055c191e9db18d969682b6426768000d946cb4a31bc379ea82cd`.
 - The Midnight entry's optional peers, as the SDK's Midnight guide lists them:
   `@midnight-ntwrk/ledger-v8@8.1.0`, `@midnightntwrk/wallet-sdk@1.2.0`,
   `@midnightntwrk/wallet-sdk-abstractions@2.1.0`,

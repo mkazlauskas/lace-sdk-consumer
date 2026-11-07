@@ -1,8 +1,8 @@
-import { createTemenosAttestedProver, type CreateAttestedProver, type TemenosVerifier } from '@laceio/sdk/midnight';
+import { createVeriteeAttestedProver, type CreateAttestedProver, type VeriteeVerifier } from '@laceio/sdk/midnight';
 import { AMD_ROOT_CERTIFICATES, AkxChannelBinder, AkxEvidenceProvider, AttestationVerificationError, AttestationVerifier, LocalCheckFailedError, RealLedgerClient, RealLocalVerifier, RealWardenClient } from '@input-output-hk/temenos-attestation-verifier';
 import { createTemenosFetch } from './temenos-fetch';
 
-const verifier: TemenosVerifier = {
+const verifier: VeriteeVerifier = {
   LocalCheckFailedError, AttestationVerificationError,
   createVerifier: config => {
     const fetchImpl = createTemenosFetch();
@@ -18,6 +18,6 @@ const verifier: TemenosVerifier = {
 
 // Shared by the real wallet runtime and wallet-free attestation preflight.
 // SDK chooses the baked deployment; AMD roots come only from the pinned verifier.
-export const createConsumerTemenosProver: CreateAttestedProver = props => createTemenosAttestedProver({
+export const createConsumerTemenosProver: CreateAttestedProver = props => createVeriteeAttestedProver({
   ...props, verifier, trustRoots: { amdRootCertificates: [...AMD_ROOT_CERTIFICATES] },
 });

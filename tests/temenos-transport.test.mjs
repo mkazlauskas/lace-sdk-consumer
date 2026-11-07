@@ -318,17 +318,17 @@ test('transport pins match installed SDK config and shared production factory re
     getLedgerIndexerUrl: async () => sdk.MIDNIGHT_PUBLIC_ENDPOINTS.preprod.indexerAddress,
     trustRoots: { amdRootCertificates: ['synthetic root; stub verifier only'] },
     verifier: { createVerifier: config => { captured = config; return { establishVerifiedSession: async () => ({ close: async () => {} }) }; } } };
-  await (await sdk.createTemenosAttestedProver(props).establishAttestedSession(() => {})).close();
+  await (await sdk.createVeriteeAttestedProver(props).establishAttestedSession(() => {})).close();
   assert.equal(captured.attestationHost, new URL(TEMENOS_UPSTREAM).host);
   assert.equal(captured.akxServerUrl, `${TEMENOS_UPSTREAM}/tee_attestation`);
   assert.equal(captured.indexerUrl, TEMENOS_ROUTES.find(route => route.kind === 'ledger').source);
   assert.equal(`${captured.wardenUrl}/dapps/verify_attestation`, TEMENOS_ROUTES.find(route => route.kind === 'warden').source);
-  assert.throws(() => sdk.createTemenosAttestedProver({ ...props, proofServerApiUrl: 'https://api.proofserver.wastedp.io' }), /No baked Temenos attestation config/);
+  assert.throws(() => sdk.createVeriteeAttestedProver({ ...props, proofServerApiUrl: 'https://api.proofserver.wastedp.io' }), /No baked (?:Temenos|Veritee) attestation config/);
   const manifest = JSON.parse(await readFile(new URL('../node_modules/@input-output-hk/temenos-attestation-verifier/package.json', import.meta.url), 'utf8'));
   assert.equal(manifest.version, '0.3.0');
   const runtime = await readFile(new URL('../src/midnight/runtime.ts', import.meta.url), 'utf8');
   const factory = await readFile(new URL('../src/midnight/temenos-provider.ts', import.meta.url), 'utf8');
-  assert.ok(runtime.includes('createAttestedProver: createConsumerTemenosProver'));
+  assert.match(runtime, /createAttestedProver: \(await import\('\.\/temenos-provider'\)\)\.createConsumerTemenosProver/);
   for (const name of ['AkxEvidenceProvider', 'AkxChannelBinder', 'RealLedgerClient', 'RealWardenClient']) assert.ok(factory.includes(`${name}.fromConfig(config, { fetchImpl })`));
   assert.ok(factory.includes('amdRootCertificates: [...AMD_ROOT_CERTIFICATES]'));
   const ledger = await readFile(new URL('../node_modules/@input-output-hk/temenos-attestation-verifier/dist/phases/ledger/contractState.js', import.meta.url), 'utf8');
